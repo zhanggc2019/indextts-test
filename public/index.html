@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="IndexTTS 本地语音合成并发测试、独立下载计时与测试报告。">
+  <title>IndexTTS · 并发测试台</title><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/corpus.css">
+</head>
+<body>
+  <header class="top"><a href="/" class="brand"><span class="mark" aria-hidden="true">▥</span> INDEX<span class="brand-light">TTS</span><span class="divider"></span><span class="brand-sub">性能实验室</span></a><div class="connection" id="connection">正在连接本地服务</div></header>
+  <main>
+    <section class="intro"><div><p class="eyebrow">SPEECH SYNTHESIS / BENCHMARK</p><h1>听见声音，<span>看见性能。</span></h1><p class="intro-note">用真实请求观察并发下的合成延迟、音频交付与吞吐表现。</p></div><div class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></section>
+    <div class="workspace">
+      <aside class="panel config-panel">
+        <div class="panel-title"><span class="section-no">01</span><h2>测试配置</h2><span class="pill">本地执行</span></div>
+        <div class="endpoint"><span class="method">POST</span><code>/api/v1/tts/synthesize</code><small id="baseUrl">https://tts.lanyun.net</small></div>
+        <form id="configForm">
+          <fieldset id="fields" disabled>
+            <input id="voiceId" type="hidden"><input name="voiceMode" type="hidden" value="random"><label>合成音色 · 每条随机</label><p class="corpus-note" id="voicePoolInfo">测试开始前查询可用音色，随机打乱后逐条使用，用尽后重新打乱。</p>
+            <label for="textSource">文本来源</label><select id="textSource" name="textSource"><option value="csv" selected>从 CSV 随机抽取</option><option value="manual">手动输入文本</option></select>
+            <p id="corpusInfo" class="corpus-note">正在加载 CSV 语料…</p>
+            <div class="label-row"><label id="textLabel" for="text">语料样例</label><span class="hint" id="charCount">0 字</span></div>
+            <textarea id="text" name="text" rows="4" readonly>正在加载语料…</textarea><p class="hint" id="textHint">每轮开始时随机抽取；各并发档位复用相同文本序列。</p>
+            <input type="hidden" name="mode" value="duration">
+            <label for="runMode">压测模式</label><select id="runMode" name="runMode"><option value="ladder">阶梯测试 · 自动逐档升并发</option><option value="single">单档测试 · 指定并发和小时数</option></select>
+            <div id="ladderFields" class="field-grid"><div><label for="concurrencies">并发阶梯 / 在途数</label><input id="concurrencies" name="concurrencies" value="4,8,16,24,32" required pattern="[0-9,，\s]+"></div><div><label for="stageMinutes">每轮持续 / 分钟</label><input id="stageMinutes" name="stageMinutes" type="number" value="10" min="1" max="60" required></div></div>
+            <div id="singleFields" class="field-grid" hidden><div><label for="singleConcurrency">固定并发数</label><input id="singleConcurrency" name="singleConcurrency" type="number" value="4" min="1" step="1" required disabled></div><div><label for="singleHours">持续时间 / 小时</label><input id="singleHours" name="singleHours" type="number" value="1" min="0.01" max="168" step="0.01" required disabled></div></div>
+            <p class="plan" id="plan">5 轮 × 10 分钟 = 50 分钟持续发压；各轮收尾另计。</p>
+            <p class="hint" id="scheduleHint">每个请求结束后自动补位，到时自动进入下一轮；请求数由实际响应速度决定。</p>
+            <details><summary>更多参数 <span>语言 / 语速 / 超时</span></summary><div class="field-grid advanced">
+              <div><label for="lang">语言</label><select id="lang" name="lang"><option value="ZH">中文 ZH</option><option value="EN">英语 EN</option><option value="JA">日语 JA</option><option value="ES">西班牙语 ES</option><option value="AR">阿拉伯语 AR</option></select></div>
+              <div><label for="warmup">预热请求（不计入报告）</label><input id="warmup" name="warmup" type="number" value="0" min="0" max="5" required></div>
+              <div><label for="speechRate">语速</label><input id="speechRate" name="speechRate" type="number" value="1" min="0.5" max="2" step="0.1" required></div>
+              <div><label for="loudnessRate">音量</label><input id="loudnessRate" name="loudnessRate" type="number" value="1" min="0" max="2" step="0.1" required></div>
+              <div><label for="synthTimeout">合成超时 / 秒（上限 20）</label><input id="synthTimeout" name="synthTimeout" type="number" value="20" min="1" max="20" required></div>
+              <div><label for="downloadTimeout">下载超时 / 秒（上限 10）</label><input id="downloadTimeout" name="downloadTimeout" type="number" value="10" min="1" max="10" required></div>
+            </div></details>
+          </fieldset>
+          <button type="submit" id="start" class="button primary" disabled><span>▶</span> 开始 50 分钟压测</button>
+          <button type="button" id="stop" class="button stop" disabled>停止并生成报告</button>
+          <p class="hint stop-note">可随时手动停止；已完成结果保留，并自动生成部分报告。</p>
+          <p class="hint run-note" id="runNote">合成上限 20 秒，下载上限 10 秒。超时记为失败后继续；本轮在途请求结束后再切换下一轮。</p>
+        </form>
+        <p class="key-note"><span>▣</span> API Key 由本地服务读取，不发送到页面。</p>
+      </aside>
+      <div class="results-area">
+        <section class="run-head"><div><p class="eyebrow">LIVE OBSERVATIONS</p><h2 id="runTitle">准备开始测试</h2></div><div class="history"><label for="history" class="sr-only">历史测试</label><select id="history"><option value="">历史测试记录</option></select><button type="button" id="clearHistory" title="清空页面历史，报告与抽样音频移入本机可恢复归档">一键清空历史</button></div></section>
+        <div id="stageStrip" class="stage-strip" aria-label="自动压测计划"></div>
+        <p id="reportNote" class="hint report-note">所有轮次归属同一测试，结束后自动保存一份汇总报告；关闭页面后本地服务会继续运行。</p>
+        <div id="notice" class="notice" role="alert" hidden></div>
+        <div class="metrics">
+          <article><p>全流程成功率</p><strong id="mSuccess">—</strong><small id="mCount">等待首次请求</small></article>
+          <article><p>平均合成耗时 <span title="包括服务端排队和网络，非纯模型推理时间">ⓘ</span></p><strong id="mSynth">—</strong><small>完整 JSON 返回</small></article>
+          <article><p>平均下载耗时</p><strong id="mDownload">—</strong><small>URL → 完整音频</small></article>
+          <article><p>合成 P95</p><strong id="mP95">—</strong><small>成功合成样本</small></article>
+        </div>
+        <section class="panel observation">
+          <div class="chart-top"><div><h2>并发与耗时</h2><p class="hint">每档成功样本的均值 · 单位：秒</p></div><div class="legend"><span><i class="synth-dot"></i>合成</span><span><i class="download-dot"></i>下载</span></div></div>
+          <div id="progressArea" class="progress-area" hidden><div class="progress-label"><span id="progressText"></span><span id="elapsed"></span></div><div class="progress-track"><div id="progressFill"></div></div></div>
+          <div id="chart" class="chart"><div class="empty-chart"><div class="empty-bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div><p>第一次测试，从一条声音开始</p><small>运行后在这里比较不同并发的耗时</small></div></div>
+          <div class="table-wrap"><table class="summary-table"><thead><tr><th>并发 / 峰值</th><th>已发 / 成功</th><th>失败 / 超时</th><th>发压 / 收尾</th><th>合成均值</th><th>合成 P95</th><th>下载均值</th><th>全流程均值</th><th>成功 RPS</th></tr></thead><tbody id="summaryBody"><tr><td colspan="9" class="empty-cell">开始后自动依次执行所有轮次</td></tr></tbody></table></div>
+          <p class="measurement-note">合成耗时包含网络、排队、推理及可能的字幕对齐/存储交付；下载单独计时，不含写盘。</p>
+        </section>
+        <section class="panel request-panel failure-panel">
+          <div class="panel-title"><span class="section-no">03</span><h2>下载失败专项分析</h2><span class="muted" id="downloadFailureCount">尚无数据</span><div class="exports"><button id="exportDownloadFailures" disabled>↓ 仅下载失败 CSV</button></div></div>
+          <p class="failure-note" id="downloadFailureNote">失败时保留下载 URL、连接/响应阶段、HTTP 状态和字节进度；手动取消单独统计。</p>
+          <div id="downloadFailureGroups" class="failure-groups"></div>
+          <div class="table-wrap failure-scroll"><table><thead><tr><th>请求 / 并发</th><th>最后观测阶段</th><th>类型 / HTTP</th><th>已收 / 预计字节</th><th>耗时</th></tr></thead><tbody id="downloadFailureBody"><tr><td colspan="5" class="empty-cell">开始测试后，会在这里单独列出下载失败。</td></tr></tbody></table></div>
+        </section>
+        <section class="panel request-panel">
+          <div class="panel-title"><span class="section-no">02</span><h2>整场请求明细</h2><span class="muted" id="detailCount">0 条</span><div class="exports"><button id="exportMd" disabled>↓ 汇总报告 .md</button><button id="exportCsv" disabled>CSV</button><button id="exportJson" disabled>JSON</button></div></div>
+          <p class="failure-note">成功、失败和取消请求均保留已收到的完整音频 URL；未收到时注明原因。页面显示最近 200 条，导出包含全部记录。</p>
+          <div class="table-wrap details-scroll"><table><thead><tr><th>请求</th><th>并发</th><th>状态</th><th>合成 / 秒</th><th>下载 / 秒</th><th>音频大小</th><th>录音</th></tr></thead><tbody id="detailBody"><tr><td colspan="7" class="empty-cell">合成状态、下载链接与失败原因将逐条显示</td></tr></tbody></table></div>
+          <div class="audio-preview" id="audioPreview" hidden><span id="audioLabel"></span><audio id="player" controls preload="none"></audio><button id="closeAudio" aria-label="关闭试听">×</button></div>
+        </section>
+        <footer><span>持续补位 · 定时自动切档 · 每 5 秒保存 · 整场统一报告</span><span>INDEXTTS / LAB 01</span></footer>
+      </div>
+    </div>
+  </main>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

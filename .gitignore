@@ -1,0 +1,13 @@
+data/
+node_modules/
+.env
+.env.*
+*.local.ps1
+*含APIKey*
+*含API Key*
+work/
+coverage/
+*.wav
+*.mp3
+*.zip
+*.log
