@@ -11,7 +11,7 @@ if (-not $env:PORT) {
         $benchUrl = "http://127.0.0.1:$benchPort"
         try {
             $benchConfig = Invoke-RestMethod -Uri "$benchUrl/api/config" -TimeoutSec 1
-            if ($benchConfig.endpoint -eq '/api/v1/tts/synthesize' -and $benchConfig.textCorpus.sourceFile -eq 'task-media-20261030.csv' -and $benchConfig.timeoutPolicy.synthTimeout -eq 20 -and $benchConfig.timeoutPolicy.downloadTimeout -eq 10 -and $benchConfig.benchmarkMode -eq 'duration' -and $benchConfig.features.singleConcurrencyHours -and $benchConfig.features.downloadDiagnostics -and $benchConfig.features.allAudioUrls -and $benchConfig.features.apiGuide20261030 -and $benchConfig.features.minioDeliveryHeaders -and $benchConfig.features.randomVoices -and $benchConfig.features.clearHistory -and $benchConfig.features.unrestrictedConcurrency) {
+            if ($benchConfig.endpoint -eq '/api/v1/tts/synthesize' -and $benchConfig.textCorpus.sourceFile -eq 'task-media-20261030.csv' -and $benchConfig.timeoutPolicy.synthTimeout -eq 20 -and $benchConfig.timeoutPolicy.downloadTimeout -eq 10 -and $benchConfig.benchmarkMode -eq 'duration' -and $benchConfig.features.singleConcurrencyHours -and $benchConfig.features.downloadDiagnostics -and $benchConfig.features.allAudioUrls -and $benchConfig.features.apiGuide20261030 -and $benchConfig.features.minioDeliveryHeaders -and $benchConfig.features.randomVoices -and $benchConfig.features.clearHistory -and $benchConfig.features.unrestrictedConcurrency -and $benchConfig.features.scheduledStart -and $benchConfig.features.editableBaseUrl) {
                 Start-Process $benchUrl
                 Write-Host "已打开运行中的测试台：$benchUrl"
                 exit 0

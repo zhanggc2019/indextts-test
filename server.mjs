@@ -12,6 +12,15 @@ export { requestBuffer } from './net-client.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 
+/** 校验基础地址，禁止把凭据或查询参数混入后续接口路径。 */
+function validateBaseUrl(value) {
+  if (typeof value !== 'string' || !/^https?:\/\//i.test(value.trim())) throw new Error('TTS 地址须为完整的 HTTP 或 HTTPS 基础地址');
+  let url;
+  try { url = new URL(value.trim()); } catch { throw new Error('TTS 地址格式无效'); }
+  if (url.username || url.password || url.search || url.hash) throw new Error('TTS 地址不能包含用户名、密码、查询参数或片段');
+  return url.href.replace(/\/+$/, '');
+}
+
 /** 从环境或用户现有文档读取凭据；不把密钥写入源代码、响应或报告。 */
 export function loadConfig() {
   let key = process.env.TTS_API_KEY || '';
@@ -88,6 +97,11 @@ export function validateConfig(input, corpus = null) {
   const lang = String(input.lang || 'ZH').toUpperCase();
   if (!['ZH','EN','JA','ES','AR'].includes(lang)) throw new Error('语言参数无效');
   const config = { mode, runMode, concurrencies, requests, stageSeconds, texts, voiceMode, voiceId, lang, textSource };
+  if (input.scheduledAt != null && input.scheduledAt !== '') {
+    if (typeof input.scheduledAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})$/.test(input.scheduledAt)) throw new Error('预约时间须为带时区的 ISO 日期时间');
+    config.scheduledAt = Date.parse(input.scheduledAt);
+    if (!Number.isFinite(config.scheduledAt) || config.scheduledAt <= Date.now()) throw new Error('预约时间须晚于当前时间');
+  }
   if (voiceMode === 'random') {
     config.voiceSamplingSeed = input.voiceSamplingSeed == null ? randomInt(1,4294967296) : Number(input.voiceSamplingSeed);
     if (!Number.isInteger(config.voiceSamplingSeed) || config.voiceSamplingSeed < 1 || config.voiceSamplingSeed > 4294967295) throw new Error('音色随机种子须为 1～4294967295 的整数');
@@ -156,13 +170,16 @@ function cooldown(ms, signal) {
 
 /** 创建本机测试服务；一个活动任务，任务结果和录音保存在本地。 */
 export function createApp(options) {
-  const opts = { ...options }; const runs = new Map(); const controls = new Map(); let startingRun=false;
+  const opts = { ...options }; const runs = new Map(); const controls = new Map(); const schedules = new Map(); let startingRun=false;
   const corpus = loadCorpus(opts.corpusPath);
   fs.mkdirSync(opts.dataDir, { recursive: true });
-  for (const file of fs.readdirSync(opts.dataDir).filter(n => n.endsWith('.json')).sort().slice(-50)) {
+  const settingsPath = path.join(opts.dataDir, 'settings.json');
+  if (fs.existsSync(settingsPath)) opts.baseUrl = validateBaseUrl(JSON.parse(fs.readFileSync(settingsPath, 'utf8')).baseUrl);
+  for (const file of fs.readdirSync(opts.dataDir).filter(n => n.endsWith('.json') && n !== 'settings.json').sort().slice(-50)) {
     try {
       const run = JSON.parse(fs.readFileSync(path.join(opts.dataDir, file), 'utf8'));
-      if (['running','warming'].includes(run.status)) {
+      if (['running','warming','scheduled','preparing'].includes(run.status)) {
+        if (run.status === 'scheduled') run.error = '预约因本地服务中断而取消，请重新预约；不会补跑';
         run.status = 'interrupted'; run.endedAt = Date.now();
         for (const r of run.results) if (!['success','failed','cancelled'].includes(r.status)) { r.status = 'cancelled'; r.error = '本地服务中断'; }
         for (const s of run.stages) if (s.startedAt && !s.endedAt) { s.endedAt = run.endedAt; s.state = 'interrupted'; s.active = 0; }
@@ -175,9 +192,9 @@ export function createApp(options) {
   function cleanError(error) { return String(error?.message || error).replaceAll(opts.apiKey || '\u0000', '[已隐藏]').slice(0, 700); }
 
   /** 用服务端凭据查询当前可用音色；限时查询且只保留安全的 ID 和名称。 */
-  async function loadVoicePool() {
+  async function loadVoicePool(signal) {
     const res=await requestBuffer(`${opts.baseUrl.replace(/\/$/,'')}/api/v1/voices`,{
-      headers:{'X-API-Key':opts.apiKey},timeoutMs:8000,maxBytes:4*1024*1024,expectedStatus:200});
+      headers:{'X-API-Key':opts.apiKey},signal,timeoutMs:8000,maxBytes:4*1024*1024,expectedStatus:200});
     let result;try {result=JSON.parse(res.buffer.toString('utf8'));} catch {throw new Error('音色列表不是有效 JSON');}
     if (!Array.isArray(result.voices)) throw new Error('音色列表缺少 voices 数组');
     const pool=new Map();
@@ -191,7 +208,7 @@ export function createApp(options) {
 
   /** 将本工具生成的历史文件移入可恢复归档，校验路径并在失败时回滚。 */
   function clearHistory() {
-    if (controls.size || startingRun) throw new Error('测试正在运行或准备中，请先停止后再清空历史');
+    if (controls.size || startingRun) throw new Error('测试正在运行、准备中或等待预约，请先停止后再清空历史');
     const root=fs.realpathSync(opts.dataDir),idPattern=/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[0-9a-f]{8}$/;
     const entries=fs.readdirSync(root,{withFileTypes:true}),ids=new Set([...runs.keys()].filter(id=>idPattern.test(id)));
     for (const entry of entries) {
@@ -199,7 +216,7 @@ export function createApp(options) {
       if (!entry.isFile() || !entry.name.endsWith('.json') || !idPattern.test(id)) continue;
       ids.add(id);
       let saved;try {saved=JSON.parse(fs.readFileSync(path.join(root,entry.name),'utf8'));} catch {continue;}
-      if (['running','warming'].includes(saved.status)) throw new Error(`磁盘中仍有运行中的测试 ${id}，请在对应服务停止后再清空`);
+      if (['running','warming','scheduled','preparing'].includes(saved.status)) throw new Error(`磁盘中仍有运行中或预约中的测试 ${id}，请在对应服务停止后再清空`);
     }
     const files=entries.filter(entry=>[...ids].some(id=>entry.name===id||['.json','.json.tmp','.md','.csv','.download-failures.csv'].some(ext=>entry.name===id+ext)));
     if (!files.length) {runs.clear();return {cleared:ids.size,archivedFiles:0,archivePath:null};}
@@ -338,6 +355,46 @@ export function createApp(options) {
     row.endedAt = Date.now();
   }
 
+  /** 统一收尾和保存报告，预约取消或启动失败时也留下可查看的记录。 */
+  function finishRun(run) {
+    for (const row of run.results) if (row.status === 'pending') { row.status = 'cancelled'; row.error = '未启动'; }
+    for (const stage of run.stages) if (!stage.startedAt) stage.state = 'skipped';
+    run.endedAt = Date.now();
+    for (const stage of run.stages) if (stage.startedAt && !stage.endedAt) {
+      stage.endedAt = run.endedAt; stage.state = run.status; stage.active = 0;
+    }
+    try {
+      persist(run);
+      fs.writeFileSync(path.join(opts.dataDir, `${run.id}.md`), markdownReport(run));
+      fs.writeFileSync(path.join(opts.dataDir, `${run.id}.csv`), csvReport(run));
+      fs.writeFileSync(path.join(opts.dataDir, `${run.id}.download-failures.csv`),csvReport({...run,results:analyzeDownloadFailures(run).failures}));
+      run.reportsReady = true; persist(run);
+    } catch (e) { run.persistenceError = cleanError(e); console.error('保存报告失败：', cleanError(e)); }
+    controls.delete(run.id);
+  }
+
+  /** 到预约时间才查询音色并预热；超过一分钟视为错过，避免休眠后在高峰补跑。 */
+  async function startScheduled(run, controller) {
+    if (controller.signal.aborted) return;
+    const remaining = run.config.scheduledAt - Date.now();
+    if (remaining > 0) {
+      schedules.set(run.id, setTimeout(() => startScheduled(run, controller), Math.min(remaining, 1000)));
+      return;
+    }
+    schedules.delete(run.id);
+    try {
+      if (remaining < -60000) throw new Error('已错过预约时间超过 1 分钟，未启动测试，请重新预约');
+      run.status = 'preparing'; persist(run);
+      if (run.config.voiceMode === 'random') run.config.voicePool = await loadVoicePool(controller.signal);
+      controller.signal.throwIfAborted();
+      run.startedAt = Date.now(); run.status = run.config.warmup ? 'warming' : 'running'; persist(run);
+    } catch (error) {
+      run.status = controller.signal.aborted ? 'cancelled' : 'failed'; run.error = cleanError(error);
+      finishRun(run); return;
+    }
+    await drive(run, controller);
+  }
+
   /** 按阶梯顺序运行固定并发工作池；不自动重试任何请求。 */
   async function drive(run, controller) {
     const signal = controller.signal;
@@ -383,20 +440,7 @@ export function createApp(options) {
     } catch (error) { run.status = signal.aborted ? 'cancelled' : 'failed'; run.error = cleanError(error); }
     finally {
       clearInterval(checkpoint);
-      for (const row of run.results) if (row.status === 'pending') { row.status = 'cancelled'; row.error = '未启动'; }
-      if (run.status === 'cancelled') for (const stage of run.stages) if (!stage.startedAt) stage.state = 'skipped';
-      run.endedAt = Date.now();
-      for (const stage of run.stages) if (stage.startedAt && !stage.endedAt) {
-        stage.endedAt = run.endedAt; stage.state = run.status; stage.active = 0;
-      }
-      try {
-        persist(run);
-        fs.writeFileSync(path.join(opts.dataDir, `${run.id}.md`), markdownReport(run));
-        fs.writeFileSync(path.join(opts.dataDir, `${run.id}.csv`), csvReport(run));
-        fs.writeFileSync(path.join(opts.dataDir, `${run.id}.download-failures.csv`),csvReport({...run,results:analyzeDownloadFailures(run).failures}));
-        run.reportsReady = true; persist(run);
-      } catch (e) { run.persistenceError = cleanError(e); console.error('保存报告失败：', cleanError(e)); }
-      controls.delete(run.id);
+      finishRun(run);
     }
   }
 
@@ -424,10 +468,19 @@ export function createApp(options) {
         baseUrl: opts.baseUrl, hasKey: Boolean(opts.apiKey), endpoint: '/api/v1/tts/synthesize',
         timeoutPolicy: { synthTimeout: 20, downloadTimeout: 10 },
         benchmarkMode: 'duration', defaultConcurrencies: [4,8,16,24,32], defaultStageSeconds: 600,
-        features: { manualStopReport: true, singleConcurrencyHours: true, downloadDiagnostics: true, successAudioUrls: true, apiGuide20261030: true, allAudioUrls: true, minioDeliveryHeaders: true, randomVoices: true, clearHistory: true, unrestrictedConcurrency: true },
+        features: { manualStopReport: true, singleConcurrencyHours: true, downloadDiagnostics: true, successAudioUrls: true, apiGuide20261030: true, allAudioUrls: true, minioDeliveryHeaders: true, randomVoices: true, clearHistory: true, unrestrictedConcurrency: true, scheduledStart: true, editableBaseUrl: true },
         textCorpus: corpus ? { sourceFile: corpus.sourceFile, column: corpus.column, count: corpus.entries.length,
           minChars: Math.min(...corpus.entries.map(e => Array.from(e.text).length)), maxChars: Math.max(...corpus.entries.map(e => Array.from(e.text).length)),
           examples: corpus.entries.slice(0, 2).map(e => e.text) } : null });
+      if (req.method === 'POST' && p === '/api/config') {
+        const input = await readJson(req);
+        if (controls.size || startingRun) return respond(res, 409, { error: '测试正在运行、准备中或等待预约，请先停止后再更换 TTS 地址' });
+        const baseUrl = validateBaseUrl(input?.baseUrl);
+        fs.writeFileSync(settingsPath + '.tmp', JSON.stringify({ baseUrl }, null, 2));
+        fs.renameSync(settingsPath + '.tmp', settingsPath);
+        opts.baseUrl = baseUrl;
+        return respond(res, 200, { baseUrl });
+      }
       if (req.method === 'GET' && p === '/api/runs') return respond(res, 200, [...runs.values()].reverse().map(r => ({ id: r.id, createdAt: r.createdAt, status: r.status, mode: r.config.mode || 'count', concurrencies: r.config.concurrencies })));
       if (req.method === 'GET' && p === '/api/voices') {
         if (!opts.apiKey) return respond(res,400,{error:'未配置 API Key，无法读取音色'});
@@ -441,10 +494,10 @@ export function createApp(options) {
       }
       if (req.method === 'POST' && p === '/api/runs') {
         if (!opts.apiKey) return respond(res, 400, { error: '未配置 API Key：请设置 TTS_API_KEY 或 TTS_DOC_PATH 后重启服务' });
-        if (controls.size || startingRun) return respond(res, 409, { error: '已有测试正在运行或准备中，请先等待完成或停止' });
+        if (controls.size || startingRun) return respond(res, 409, { error: '已有测试正在运行、准备中或等待预约，请先等待完成或停止' });
         const config = validateConfig(await readJson(req), corpus);
-        if (controls.size || startingRun) return respond(res,409,{error:'已有测试正在运行或准备中'});
-        if (config.voiceMode === 'random') {
+        if (controls.size || startingRun) return respond(res,409,{error:'已有测试正在运行、准备中或等待预约'});
+        if (config.voiceMode === 'random' && !config.scheduledAt) {
           startingRun=true;
           try {config.voicePool=await loadVoicePool();}
           catch(error) {return respond(res,502,{error:'无法开始随机音色测试：'+cleanError(error)});}
@@ -452,15 +505,18 @@ export function createApp(options) {
         }
         config.audioDelivery = 'minio'; config.audioPurpose = 'live_socket';
         const id = new Date().toISOString().replace(/[:.]/g, '-') + '-' + randomUUID().slice(0, 8);
-        const run = { id, createdAt: Date.now(), status: config.warmup ? 'warming' : 'running', baseUrl: opts.baseUrl, config,
+        const run = { id, createdAt: Date.now(), startedAt: config.scheduledAt ? null : Date.now(), status: config.scheduledAt ? 'scheduled' : config.warmup ? 'warming' : 'running', baseUrl: opts.baseUrl, config,
           stages: config.concurrencies.map((concurrency, index) => ({ index, concurrency, peakActive: 0, active: 0, state: 'pending' })), results: [] };
         if (config.mode === 'count') {
           const sampler = createTextSampler(config, corpus);
           for (const s of run.stages) for (let i = 0; i < config.requests; i++) newRow(run, s, i, sampler(i));
         }
         runs.set(id, run); const controller = new AbortController(); setMaxListeners(0, controller.signal);
-        controls.set(id, controller); persist(run);
-        setImmediate(() => drive(run, controller)); return respond(res, 201, { id });
+        controls.set(id, controller);
+        try { persist(run); } catch (error) { controls.delete(id); runs.delete(id); throw error; }
+        if (config.scheduledAt) startScheduled(run, controller);
+        else setImmediate(() => drive(run, controller));
+        return respond(res, 201, { id });
       }
       const match = p.match(/^\/api\/runs\/([^/]+)(?:\/(stop|download-failures\.csv|report\.(?:md|json|csv)|audio\/(\d+)))?$/);
       if (match) {
@@ -471,6 +527,10 @@ export function createApp(options) {
           if (controller && !controller.signal.aborted) {
             run.stopRequestedAt = Date.now(); run.stopReason = '用户手动停止';
             controller.abort(new Error('用户手动停止测试'));
+            if (run.status === 'scheduled') {
+              clearTimeout(schedules.get(run.id)); schedules.delete(run.id);
+              run.status = 'cancelled'; run.stopReason = '用户取消预约'; finishRun(run);
+            }
           }
           return respond(res, 200, { ok: true, reportsReady: Boolean(run.reportsReady) });
         }
@@ -503,7 +563,14 @@ export function createApp(options) {
     } catch (error) { respond(res, 400, { error: cleanError(error) }); }
   });
   server.requestTimeout = 30000;
-  return { server, runs, shutdown: () => { for (const c of controls.values()) c.abort(new Error('服务关闭')); server.close(); } };
+  /** 清理预约计时器和在途连接，重启时将未执行预约标为中断而不补跑。 */
+  function shutdown() {
+    for (const timer of schedules.values()) clearTimeout(timer);
+    schedules.clear();
+    for (const c of controls.values()) c.abort(new Error('服务关闭'));
+    server.close();
+  }
+  return { server, runs, shutdown };
 }
 
 /** Windows 下在服务就绪后打开默认浏览器，避免启动页面时连接被拒绝。 */

@@ -13,6 +13,15 @@
       <aside class="panel config-panel">
         <div class="panel-title"><span class="section-no">01</span><h2>测试配置</h2><span class="pill">本地执行</span></div>
         <div class="endpoint"><span class="method">POST</span><code>/api/v1/tts/synthesize</code><small id="baseUrl">https://tts.lanyun.net</small></div>
+        <form id="serviceForm" class="service-settings">
+          <fieldset id="serviceFields" disabled>
+            <label for="ttsBaseUrl">TTS 服务地址</label>
+            <input id="ttsBaseUrl" type="url" placeholder="https://tts.example.com" required aria-describedby="serviceHint" autocomplete="off" spellcheck="false">
+            <button type="submit" class="button save-service" id="saveService">保存地址</button>
+          </fieldset>
+          <p class="hint" id="serviceHint">填写基础地址，无需填写接口路径。保存后立即生效并保留，继续使用本机 API Key；测试或预约期间不可更换。</p>
+          <p class="hint service-status" id="serviceStatus" role="status" aria-live="polite"></p>
+        </form>
         <form id="configForm">
           <fieldset id="fields" disabled>
             <input id="voiceId" type="hidden"><input name="voiceMode" type="hidden" value="random"><label>合成音色 · 每条随机</label><p class="corpus-note" id="voicePoolInfo">测试开始前查询可用音色，随机打乱后逐条使用，用尽后重新打乱。</p>
@@ -26,6 +35,8 @@
             <div id="singleFields" class="field-grid" hidden><div><label for="singleConcurrency">固定并发数</label><input id="singleConcurrency" name="singleConcurrency" type="number" value="4" min="1" step="1" required disabled></div><div><label for="singleHours">持续时间 / 小时</label><input id="singleHours" name="singleHours" type="number" value="1" min="0.01" max="168" step="0.01" required disabled></div></div>
             <p class="plan" id="plan">5 轮 × 10 分钟 = 50 分钟持续发压；各轮收尾另计。</p>
             <p class="hint" id="scheduleHint">每个请求结束后自动补位，到时自动进入下一轮；请求数由实际响应速度决定。</p>
+            <label for="startMode">启动方式</label><select id="startMode"><option value="now">立即开始</option><option value="scheduled">定时开始 · 一次性预约</option></select>
+            <div id="scheduledFields" hidden><label for="scheduledAt">开始日期和时间 · 本机时区</label><input id="scheduledAt" type="datetime-local" disabled><p class="hint">关闭页面不影响预约；须保持本地服务运行、电脑唤醒。服务重启或错过时间超过 1 分钟不会补跑。</p></div>
             <details><summary>更多参数 <span>语言 / 语速 / 超时</span></summary><div class="field-grid advanced">
               <div><label for="lang">语言</label><select id="lang" name="lang"><option value="ZH">中文 ZH</option><option value="EN">英语 EN</option><option value="JA">日语 JA</option><option value="ES">西班牙语 ES</option><option value="AR">阿拉伯语 AR</option></select></div>
               <div><label for="warmup">预热请求（不计入报告）</label><input id="warmup" name="warmup" type="number" value="0" min="0" max="5" required></div>

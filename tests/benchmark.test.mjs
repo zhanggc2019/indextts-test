@@ -24,16 +24,20 @@ async function until(read, accept, maxMs = 8000) {
 
 /** 构造本地可控上游服务，覆盖成功、重定向、错误和慢响应。 */
 async function fixture(t, corpus, settings={}) {
-  const observed = { synthActive:0, synthPeak:0, calls:0, voiceCalls:0, audioHeaders:[], bodies:[] };
+  const observed = { synthActive:0, synthPeak:0, calls:0, voiceCalls:0, voiceTimes:[], synthTimes:[], audioHeaders:[], bodies:[] };
   const upstream = http.createServer(async (req,res) => {
     if (req.url === '/api/v1/voices') {
       observed.voiceCalls++;assert.equal(req.headers['x-api-key'],'unit-secret');
+      observed.voiceTimes.push(Date.now());
+      if (settings.voiceDelay) await new Promise(resolve=>setTimeout(resolve,settings.voiceDelay));
+      if (res.destroyed) return;
       res.writeHead(settings.voiceStatus||200,{'Content-Type':'application/json'});
       res.end(JSON.stringify({voices:settings.voices||[{voice_id:'voice_test',name:'默认测试音色'}]}));return;
     }
     if (req.url === '/api/v1/tts/synthesize') {
       let body = ''; for await (const chunk of req) body += chunk;
       const payload = JSON.parse(body); observed.bodies.push(payload); observed.calls++;
+      observed.synthTimes.push(Date.now());
       assert.equal(req.headers['x-api-key'], 'unit-secret');
       assert.equal(req.headers['x-audio-delivery'], 'minio');
       assert.equal(req.headers['x-audio-purpose'], 'live_socket');
@@ -90,6 +94,155 @@ async function fixture(t, corpus, settings={}) {
   }
   return { app, observed, base, call, run, corpusPath, folder };
 }
+
+// 更换后所有新请求转向新服务，旧报告保留原地址，设置可跨重启保留。
+test('页面地址设置立即切换音色和合成上游，重启及清空历史后仍保留', async t => {
+  const f = await fixture(t), target = await fixture(t);
+  const original = (await f.call('/api/config')).data;
+  assert.equal(original.features.editableBaseUrl, true);
+  const oldRun = await f.run({concurrencies:'1',requests:1});
+  const targetUrl = (await target.call('/api/config')).data.baseUrl;
+  const saved = await f.call('/api/config', {baseUrl:`  ${targetUrl}///  `});
+  assert.equal(saved.status,200); assert.equal(saved.data.baseUrl,targetUrl);
+  assert.equal((await f.call('/api/config')).data.baseUrl,targetUrl);
+  assert.equal((await f.call('/api/voices')).status,200);
+  const run = await f.run({concurrencies:'1',requests:1,text:'RELATIVE_URL'});
+  assert.equal(run.status,'completed'); assert.equal(run.baseUrl,targetUrl);
+  assert.equal(f.observed.calls,1); assert.equal(target.observed.calls,1);
+  assert.equal(target.observed.voiceCalls,2);
+  assert.equal((await f.call('/api/runs/'+oldRun.id)).data.baseUrl,original.baseUrl);
+  const settings = JSON.parse(fs.readFileSync(path.join(f.folder,'settings.json'),'utf8'));
+  assert.deepEqual(settings,{baseUrl:targetUrl});
+  assert.equal((await f.call('/api/history/clear',{})).status,200);
+  assert.ok(fs.existsSync(path.join(f.folder,'settings.json')));
+  const restored = createApp({apiKey:'unit-secret',baseUrl:original.baseUrl,dataDir:f.folder});
+  t.after(()=>restored.shutdown());
+  await new Promise(resolve=>restored.server.listen(0,'127.0.0.1',resolve));
+  const response = await fetch(`http://127.0.0.1:${restored.server.address().port}/api/config`);
+  assert.equal((await response.json()).baseUrl,targetUrl); assert.equal(restored.runs.size,0);
+});
+
+// 非法地址及磁盘写入失败都不能改变当前生效地址。
+test('页面地址设置校验协议和敏感 URL 字段，保存失败保持原配置', async t => {
+  const f = await fixture(t), original = (await f.call('/api/config')).data.baseUrl;
+  for (const baseUrl of ['',null,123,'localhost:8000','file:///tmp/test','https://','http://[','https://user:secret@example.com','https://example.com?x=1','https://example.com#test']) {
+    assert.equal((await f.call('/api/config',{baseUrl})).status,400);
+  }
+  assert.equal((await f.call('/api/config')).data.baseUrl,original);
+  fs.mkdirSync(path.join(f.folder,'settings.json.tmp'));
+  assert.equal((await f.call('/api/config',{baseUrl:'https://example.com'})).status,400);
+  assert.equal((await f.call('/api/config')).data.baseUrl,original);
+  assert.ok(!fs.existsSync(path.join(f.folder,'settings.json')));
+});
+
+// 包含查询音色但尚未建立任务的时间窗口，避免同一场测试混用地址。
+test('等待预约、准备及运行时禁止切换 TTS 地址', async t => {
+  const f = await fixture(t,undefined,{voiceDelay:150});
+  const original = (await f.call('/api/config')).data.baseUrl;
+  const scheduled = await f.call('/api/runs',{text:'测试',scheduledAt:new Date(Date.now()+3600000).toISOString()});
+  assert.equal((await f.call('/api/config',{baseUrl:'https://example.com'})).status,409);
+  await f.call(`/api/runs/${scheduled.data.id}/stop`,{});
+  const pending = f.call('/api/runs',{text:'SLOW',concurrencies:'1',requests:1});
+  await until(async()=>f.observed.voiceCalls,count=>count>0);
+  assert.equal((await f.call('/api/config',{baseUrl:'https://example.com'})).status,409);
+  const start = await pending; assert.equal(start.status,201);
+  assert.equal((await f.call('/api/config',{baseUrl:'https://example.com'})).status,409);
+  assert.equal((await f.call('/api/config')).data.baseUrl,original);
+  await f.call(`/api/runs/${start.data.id}/stop`,{});
+});
+
+// 预约参数仅接受带时区的未来时间，避免服务端时区造成歧义。
+test('预约校验拒绝过去、无时区及非法时间，并保留绝对时间',()=>{
+  const input={text:'测试'};
+  for (const scheduledAt of ['yesterday','2020-01-01T00:00:00Z','2099-01-01T02:00','2099-99-99T02:00:00Z',123,true,{}]) {
+    assert.throws(()=>validateConfig({...input,scheduledAt}),/预约时间/);
+  }
+  const date=new Date(Date.now()+3600000).toISOString();
+  assert.equal(validateConfig({...input,scheduledAt:date}).scheduledAt,Date.parse(date));
+  assert.equal(validateConfig({...input,scheduledAt:'2099-01-01T02:00:00+08:00'}).scheduledAt,Date.parse('2098-12-31T18:00:00Z'));
+  assert.equal(validateConfig({...input,scheduledAt:''}).scheduledAt,undefined);
+});
+
+// 到点后才查询音色和预热，等待预约不计入测试时间。
+test('一次性预约到点启动，预热和各档完整执行且阻止重复开测和清空',async t=>{
+  const f=await fixture(t);const scheduledAt=Date.now()+600;
+  const start=await f.call('/api/runs',{text:'正常测试',concurrencies:'1,2',requests:2,warmup:1,scheduledAt:new Date(scheduledAt).toISOString()});
+  assert.equal(start.status,201);
+  const waiting=(await f.call('/api/runs/'+start.data.id+'?compact=1')).data;
+  assert.equal(waiting.status,'scheduled');assert.equal(waiting.startedAt,null);
+  assert.equal(f.observed.calls,0);assert.equal(f.observed.voiceCalls,0);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.folder,start.data.id+'.json'),'utf8')).status,'scheduled');
+  assert.equal((await f.call('/api/config')).data.features.scheduledStart,true);
+  assert.equal((await f.call('/api/runs',{text:'不能重复开始'})).status,409);
+  assert.equal((await f.call('/api/history/clear',{})).status,409);
+  const run=await until(async()=>(await f.call('/api/runs/'+start.data.id)).data,r=>r.reportsReady);
+  assert.equal(run.status,'completed');assert.equal(run.config.scheduledAt,scheduledAt);
+  assert.ok(run.startedAt>=scheduledAt);assert.ok(run.startedAt>run.createdAt);
+  assert.equal(f.observed.voiceCalls,1);assert.equal(f.observed.calls,5);
+  assert.ok(f.observed.voiceTimes.every(time=>time>=scheduledAt));
+  assert.ok(f.observed.synthTimes.every(time=>time>=scheduledAt));
+  assert.ok(run.stages.every(stage=>stage.state==='completed'));
+  assert.match(markdownReport(run),/预约启动时间/);assert.match(markdownReport(run),/实际开始时间（含预热）/);
+});
+
+// 超过 setTimeout 上限的预约也不能提前触发，取消必须释放唯一任务槽位。
+test('远期预约不会立即触发，取消幂等且不发起请求，随后能立即开测',async t=>{
+  const f=await fixture(t);
+  const start=await f.call('/api/runs',{text:'正常测试',concurrencies:'1',requests:1,scheduledAt:new Date(Date.now()+40*86400000).toISOString()});
+  assert.equal(start.status,201);
+  await new Promise(resolve=>setTimeout(resolve,80));
+  assert.equal(f.observed.calls,0);assert.equal(f.observed.voiceCalls,0);
+  await f.call(`/api/runs/${start.data.id}/stop`,{});
+  const run=(await f.call('/api/runs/'+start.data.id)).data;
+  assert.equal(run.status,'cancelled');assert.equal(run.startedAt,null);assert.equal(run.stopReason,'用户取消预约');
+  assert.ok(run.reportsReady);assert.equal(run.stages[0].state,'skipped');
+  assert.ok(run.results.every(row=>row.status==='cancelled'&&!row.startedAt));
+  await f.call(`/api/runs/${start.data.id}/stop`,{});
+  assert.equal((await f.call('/api/runs/'+start.data.id)).data.stopRequestedAt,run.stopRequestedAt);
+  assert.match(markdownReport(run),/尚未开始/);
+  const next=await f.run({concurrencies:'1',requests:1});assert.equal(next.status,'completed');
+  assert.equal(f.observed.calls,1);
+});
+
+// 查询失败保留失败报告，查询过程中取消也不能漏出合成请求。
+test('预约启动时音色失败和准备中取消均不发压且生成报告',async t=>{
+  const broken=await fixture(t,undefined,{voiceStatus:503});
+  const failed=await broken.call('/api/runs',{text:'测试',concurrencies:'1',requests:1,scheduledAt:new Date(Date.now()+80).toISOString()});
+  const run=await until(async()=>(await broken.call('/api/runs/'+failed.data.id)).data,r=>r.reportsReady);
+  assert.equal(run.status,'failed');assert.equal(broken.observed.calls,0);assert.equal(run.startedAt,null);
+  const slow=await fixture(t,undefined,{voiceDelay:500});
+  const start=await slow.call('/api/runs',{text:'测试',scheduledAt:new Date(Date.now()+80).toISOString()});
+  await until(async()=>(await slow.call('/api/runs/'+start.data.id)).data,r=>r.status==='preparing');
+  await slow.call(`/api/runs/${start.data.id}/stop`,{});
+  const stopped=await until(async()=>(await slow.call('/api/runs/'+start.data.id)).data,r=>r.reportsReady);
+  assert.equal(stopped.status,'cancelled');assert.equal(stopped.startedAt,null);assert.equal(slow.observed.calls,0);
+});
+
+// 模拟休眠后发现时间已过，避免在错误时段补跑压测。
+test('错过预约一分钟后记为失败，不补跑合成并释放任务槽位',async t=>{
+  const f=await fixture(t);
+  const start=await f.call('/api/runs',{text:'测试',scheduledAt:new Date(Date.now()+100).toISOString()});
+  f.app.runs.get(start.data.id).config.scheduledAt=Date.now()-61000;
+  const run=await until(async()=>(await f.call('/api/runs/'+start.data.id)).data,r=>r.reportsReady);
+  assert.equal(run.status,'failed');assert.match(run.error,/错过预约/);
+  assert.equal(f.observed.calls,0);assert.equal(f.observed.voiceCalls,0);
+  assert.equal((await f.call('/api/history/clear',{})).status,200);
+});
+
+// 重启不恢复发压，也不改写可能属于其他仍在运行服务的磁盘快照。
+test('服务重启把未执行预约标为中断，重复重启也不会补跑',async t=>{
+  const f=await fixture(t);
+  const start=await f.call('/api/runs',{text:'测试',scheduledAt:new Date(Date.now()+300).toISOString()});
+  f.app.shutdown();
+  const restored=createApp({apiKey:'unit-secret',baseUrl:'http://127.0.0.1:1',dataDir:f.folder});
+  t.after(()=>restored.shutdown());
+  const run=restored.runs.get(start.data.id);
+  assert.equal(run.status,'interrupted');assert.match(run.error,/不会补跑/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.folder,run.id+'.json'),'utf8')).status,'scheduled');
+  await new Promise(resolve=>setTimeout(resolve,400));assert.equal(f.observed.calls,0);assert.equal(f.observed.voiceCalls,0);
+  const again=createApp({apiKey:'unit-secret',baseUrl:'http://127.0.0.1:1',dataDir:f.folder});
+  t.after(()=>again.shutdown());assert.equal(again.runs.get(run.id).status,'interrupted');
+});
 
 test('统计使用最近秩、独立阶段样本和真实吞吐分母', () => {
   assert.equal(distribution([]).p95,null); assert.equal(distribution([1,2,3,4,5]).p95,5);

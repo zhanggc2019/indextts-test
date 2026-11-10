@@ -168,8 +168,11 @@ export function markdownReport(run) {
     .map(r=>[r.sourceId || r.sourceRecord,r])).values()] : [];
   const lines = [
     timed ? run.config.runMode === 'single' ? '# IndexTTS 单档持续并发测试报告' : '# IndexTTS 持续并发压测汇总报告' : '# IndexTTS 并发测试报告', '',
-    `- 测试编号：${run.id}`, `- 状态：${run.status}`, `- 开始时间：${date(run.createdAt)}（北京时间）`,
+    `- 测试编号：${run.id}`, `- 状态：${run.status}`,
+    ...(run.config.scheduledAt ? [`- 预约创建时间：${date(run.createdAt)}（北京时间）`, `- 预约启动时间：${date(run.config.scheduledAt)}（北京时间）`,
+      `- 实际开始时间（含预热）：${run.startedAt ? date(run.startedAt) : '尚未开始'}`] : [`- 开始时间：${date(run.startedAt || run.createdAt)}（北京时间）`]),
     `- 结束时间：${date(run.endedAt)}`, `- 接口：POST ${run.baseUrl}/api/v1/tts/synthesize`,
+    ...(run.error ? [`- 任务说明：${md(run.error)}`] : []),
     ...(run.status === 'cancelled' ? [`- 停止原因：${md(run.stopReason || '任务已取消')}`, `- 停止时间：${date(run.stopRequestedAt || run.endedAt)}`,
       '- 报告范围：部分结果（已完成请求及在途取消记录）；未执行轮次不记为已完成。'] : []),
     `- 音色：${run.config.voiceMode==='random'?`每条随机（${run.config.voicePool?.length||0} 个可用音色）`:run.config.voiceId}`, `- 语言：${run.config.lang}；语速：${run.config.speechRate}；音量：${run.config.loudnessRate}`,

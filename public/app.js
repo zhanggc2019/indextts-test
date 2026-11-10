@@ -3,6 +3,7 @@ import { distribution, seconds, analyzeDownloadFailures, audioUrlMissingReason, 
 const $ = id => document.getElementById(id);
 let current = null, timer = null, configured = false, busy = false, corpusInfo = null, pollFailures = 0, stopping = false, clearingHistory = false;
 let manualText = '你好，这是一次语音合成并发测试，我们正在测量合成速度和音频下载耗时。';
+let serviceReady = false, savingService = false, activeBaseUrl = '', voiceInfoVersion = 0;
 const statusLabels = { pending:'等待', synthesizing:'合成中', downloading:'下载中', success:'成功', failed:'失败', cancelled:'已取消' };
 
 /** 转义外部接口文本，避免音频 URL 和错误信息注入页面。 */
@@ -57,9 +58,17 @@ function updatePlan() {
   $('plan').textContent = plan.description;
   $('scheduleHint').textContent = plan.single ? '始终按固定并发补位，到时收尾并生成报告；也可随时手动停止。' : '每个请求结束后自动补位，到时自动进入下一轮；请求数由实际响应速度决定。';
   $('runNote').textContent = plan.single ? '合成上限 20 秒，下载上限 10 秒。到时停止新增请求并收尾；手动停止会取消在途连接并生成部分报告。' : '合成上限 20 秒，下载上限 10 秒。超时记为失败后继续；本轮在途请求结束后再切换下一轮。';
-  if (!busy) $('start').innerHTML = `<span>▶</span> ${esc(plan.label)}`;
+  if (!busy) $('start').innerHTML = `<span>▶</span> ${esc($('startMode').value === 'scheduled' ? '预约定时测试' : plan.label)}`;
   if (!current || !busy) drawStages(plan.stages.map(concurrency=>({concurrency,state:'pending'})), plan.seconds);
   $('charCount').textContent = `${Array.from($('text').value).length} 字`;
+}
+
+/** 切换一次性预约输入；浏览器按本机时区收集日期，提交时再转换为绝对时间。 */
+function updateStartMode() {
+  const scheduled = $('startMode').value === 'scheduled';
+  $('scheduledFields').hidden = !scheduled;
+  $('scheduledAt').disabled = !scheduled; $('scheduledAt').required = scheduled;
+  updatePlan();
 }
 
 /** 切换 CSV 随机抽样和手动文本，标明样例与实际请求的区别。 */
@@ -79,12 +88,14 @@ function updateTextSource() {
 /** 根据运行状态锁定配置并切换开始、停止按钮。 */
 function setBusy(value) {
   if (!value) stopping = false;
-  busy = value; $('fields').disabled = value || !configured; $('start').disabled = value || clearingHistory || !configured;
+  busy = value; $('fields').disabled = value || !configured; $('start').disabled = value || clearingHistory || savingService || !configured;
+  $('serviceFields').disabled = value || savingService || !serviceReady;
   $('history').disabled = value || clearingHistory;
   $('clearHistory').disabled=value||clearingHistory;
-  $('start').innerHTML = value ? '<span>◌</span> 持续压测正在运行' : `<span>▶</span> ${esc(currentPlan().label)}`;
+  const scheduled = current?.status === 'scheduled';
+  $('start').innerHTML = value ? `<span>◌</span> ${scheduled ? '等待预约时间' : current?.status === 'preparing' ? '正在准备测试' : '持续压测正在运行'}` : `<span>▶</span> ${esc($('startMode').value === 'scheduled' ? '预约定时测试' : currentPlan().label)}`;
   $('stop').hidden = false; $('stop').disabled = !value || stopping;
-  $('stop').textContent = stopping ? '正在停止并生成报告…' : '停止并生成报告';
+  $('stop').textContent = stopping ? '正在停止并生成报告…' : scheduled ? '取消预约' : '停止并生成报告';
 }
 
 /** 把秒格式化为倒计时，零值和缺失值均有限显示。 */
@@ -104,7 +115,7 @@ function drawStages(stages, duration) {
 /** 刷新历史下拉列表；只保留本地已保存的真实测试。 */
 async function loadHistory(selected = current?.id) {
   const runs = await api('/api/runs');
-  $('history').innerHTML = '<option value="">历史测试记录</option>' + runs.map(r => `<option value="${esc(r.id)}">${esc(new Date(r.createdAt).toLocaleString('zh-CN', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:false }))} · C${r.concurrencies.join('/')} · ${esc(({completed:'完成',running:'运行中',warming:'预热中',cancelled:'已取消',failed:'失败',interrupted:'已中断'})[r.status] || r.status)}</option>`).join('');
+  $('history').innerHTML = '<option value="">历史测试记录</option>' + runs.map(r => `<option value="${esc(r.id)}">${esc(new Date(r.createdAt).toLocaleString('zh-CN', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:false }))} · C${r.concurrencies.join('/')} · ${esc(({completed:'完成',running:'运行中',warming:'预热中',scheduled:'已预约',preparing:'准备中',cancelled:'已取消',failed:'失败',interrupted:'已中断'})[r.status] || r.status)}</option>`).join('');
   $('history').value = selected || '';
   return runs;
 }
@@ -151,6 +162,12 @@ function renderDownloadFailures(run) {
 /** 把真实测试快照渲染为指标、阶梯对比表与逐请求明细。 */
 function render(run) {
   if (current?.id !== run.id) {
+    $('startMode').value = run.status === 'scheduled' ? 'scheduled' : 'now';
+    if (run.config.scheduledAt) {
+      const date = new Date(run.config.scheduledAt);
+      $('scheduledAt').value = new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0,16);
+    }
+    updateStartMode();
     for (const key of ['voiceId','lang','warmup','speechRate','loudnessRate']) $(key).value = run.config[key];
     $('synthTimeout').value = Math.min(Number(run.config.synthTimeout) || 20, 20);
     $('downloadTimeout').value = Math.min(Number(run.config.downloadTimeout) || 10, 10);
@@ -166,7 +183,9 @@ function render(run) {
     updateTextSource();
   }
   current = run;
-  const active = ['running','warming'].includes(run.status); setBusy(active);
+  const active = ['running','warming','scheduled','preparing'].includes(run.status); setBusy(active);
+  const scheduled = run.status === 'scheduled';
+  const scheduledTime = run.config.scheduledAt ? new Date(run.config.scheduledAt).toLocaleString('zh-CN', {hour12:false}) : '';
   const success = run.results.filter(r => r.status === 'success');
   const attempted = run.results.filter(r => r.startedAt);
   const totals = run.overall || {attempted:attempted.length,success:success.length,failed:run.results.filter(r=>r.status==='failed').length,timedOut:run.results.filter(r=>r.timedOut).length,total:run.results.length};
@@ -182,14 +201,15 @@ function render(run) {
   const stage = run.stages.find(s => s.startedAt && !s.endedAt);
   const stageSummary = stage ? run.summary[stage.index] : null;
   const timed = run.config.mode === 'duration';
-  $('runTitle').textContent = ({running:stage ? `${run.config.runMode === 'single' ? '单档持续' : '第 '+(stage.index+1)+' / '+run.stages.length+' 轮'} · ${stage.concurrency} 并发${stageSummary?.state === 'draining' ? ' · 收尾中' : ''}` : '正在切换下一轮',warming:`正在预热 ${run.warmupDone || 0}/${run.config.warmup}`,completed:timed ? run.config.runMode === 'single' ? '单档测试完成，报告已就绪' : '全部轮次完成，汇总报告已就绪' : '历史测试已完成',cancelled:'压测已停止，已汇总现有结果',failed:'测试失败，已保留结果',interrupted:'服务中断，已保留结果'})[run.status] || run.status;
+  $('runTitle').textContent = ({scheduled:`已预约 · ${scheduledTime}`,preparing:'正在查询音色，准备开始测试',running:stage ? `${run.config.runMode === 'single' ? '单档持续' : '第 '+(stage.index+1)+' / '+run.stages.length+' 轮'} · ${stage.concurrency} 并发${stageSummary?.state === 'draining' ? ' · 收尾中' : ''}` : '正在切换下一轮',warming:`正在预热 ${run.warmupDone || 0}/${run.config.warmup}`,completed:timed ? run.config.runMode === 'single' ? '单档测试完成，报告已就绪' : '全部轮次完成，汇总报告已就绪' : '历史测试已完成',cancelled:run.config.scheduledAt && !run.startedAt ? '预约已取消，未发起测试' : '压测已停止，已汇总现有结果',failed:'测试失败，已保留结果',interrupted:'服务中断，已保留结果'})[run.status] || run.status;
   $('progressArea').hidden = false;
   const progress = timed ? run.summary.reduce((n,s)=>n+s.admissionSeconds,0) / (run.config.stageSeconds*run.stages.length) : terminal/Math.max(1,totals.total);
   $('progressText').textContent = timed ? `${run.stages.filter(s=>s.state==='completed').length} / ${run.stages.length} 轮完成 · 已发 ${totals.attempted} 条 · 超时 ${totals.timedOut} 条` : `${terminal} 条已结束`;
-  $('elapsed').textContent = stage && timed ? stageSummary?.state === 'draining' ? `在途 ${stage.active || 0} 条，等待超时内收尾` : `本轮剩余 ${clock((stage.deadlineAt-Date.now())/1000)}` : `总用时 ${clock((ended-run.createdAt)/1000)}`;
+  $('elapsed').textContent = scheduled ? `距离启动 ${clock((run.config.scheduledAt-Date.now())/1000)}` : stage && timed ? stageSummary?.state === 'draining' ? `在途 ${stage.active || 0} 条，等待超时内收尾` : `本轮剩余 ${clock((stage.deadlineAt-Date.now())/1000)}` : `总用时 ${clock(run.startedAt ? (ended-run.startedAt)/1000 : run.config.scheduledAt ? 0 : (ended-run.createdAt)/1000)}`;
   $('progressFill').style.width = `${Math.min(100,progress*100)}%`;
   drawStages(run.summary, timed ? run.config.stageSeconds : 0);
   $('reportNote').textContent = run.reportsReady ? run.status === 'cancelled' ? '已保存停止时的部分报告：包含已完成结果、在途取消记录及未执行轮次。下方可导出 Markdown、CSV 和 JSON。' : '整场汇总报告已自动保存。下方可导出所有轮次的 Markdown、CSV 和 JSON。' : active ? '本地服务持续运行并自动保存进度；到时自动结束，也可随时点击“停止并生成报告”。' : '当前显示历史结果；新测试采用上方持续时间配置。';
+  if (scheduled) $('reportNote').textContent = `将在 ${scheduledTime}（本机时间）启动，包含预热；当前不会发起合成请求。可取消预约，须保持服务运行、电脑唤醒。`;
   $('exportMd').textContent = run.status === 'cancelled' ? '↓ 停止报告 .md' : '↓ 汇总报告 .md';
   drawChart(run.summary);
   $('summaryBody').innerHTML = run.summary.map(s => `<tr><td>${s.concurrency} / ${s.peakActive}</td><td>${s.attempted} / ${s.success}</td><td>${s.failed} / ${s.timedOut}</td><td>${clock(s.admissionSeconds)} / ${s.drainSeconds.toFixed(1)}s</td><td>${seconds(s.synth.mean)} s</td><td>${seconds(s.synth.p95)} s</td><td>${seconds(s.download.mean)} s</td><td>${seconds(s.e2e.mean)} s</td><td>${s.rps === null ? '—' : s.rps.toFixed(3)}</td></tr>`).join('');
@@ -214,7 +234,7 @@ async function poll(id) {
   clearTimeout(timer);
   try {
     const run = await api(`/api/runs/${encodeURIComponent(id)}?compact=1`); pollFailures = 0; notice(); render(run);
-    if (['running','warming'].includes(run.status)) timer = setTimeout(() => poll(id), 800);
+    if (['running','warming','scheduled','preparing'].includes(run.status)) timer = setTimeout(() => poll(id), 800);
     else await loadHistory(id);
   } catch (e) {
     pollFailures++;
@@ -229,10 +249,16 @@ async function poll(id) {
 
 /** 提交一组真实阶梯并发请求，不把 API Key 放入表单。 */
 async function startTest(event) {
-  event.preventDefault(); if (busy) return;
+  event.preventDefault(); if (busy || savingService) return;
+  if ($('ttsBaseUrl').value.trim().replace(/\/+$/, '') !== activeBaseUrl.replace(/\/+$/, '')) { notice('TTS 地址尚未保存，请先点击“保存地址”。'); return; }
   const input = Object.fromEntries(new FormData($('configForm')));
   if (input.runMode === 'single') { input.concurrencies = input.singleConcurrency; input.stageSeconds = Number(input.singleHours) * 3600; }
   if (input.textSource === 'manual') manualText = input.text;
+  if ($('startMode').value === 'scheduled') {
+    const date = new Date($('scheduledAt').value);
+    if (!Number.isFinite(date.getTime()) || date.getTime() <= Date.now()) { notice('请选择晚于当前时间的预约时间'); return; }
+    input.scheduledAt = date.toISOString();
+  }
   stopping = false; notice(); setBusy(true);
   try {
     const { id } = await api('/api/runs', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(input) });
@@ -284,12 +310,30 @@ async function clearHistory() {
   finally {clearingHistory=false;setBusy(busy);}
 }
 
-/** 展示当前身份可用音色数量；正式开始时服务端会重新查询音色池。 */
+/** 保存基础地址并刷新音色信息，失败时继续显示当前生效地址。 */
+async function saveService(event) {
+  event.preventDefault(); if (busy || savingService || !serviceReady) return;
+  savingService = true; setBusy(busy);
+  $('serviceStatus').textContent = '正在保存地址…';
+  try {
+    const result = await api('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ baseUrl:$('ttsBaseUrl').value }) });
+    activeBaseUrl = result.baseUrl;
+    $('baseUrl').textContent = activeBaseUrl; $('ttsBaseUrl').value = activeBaseUrl;
+    $('serviceStatus').textContent = '地址已保存并生效，无需重启。';
+    void loadVoiceInfo();
+  } catch (error) { $('serviceStatus').textContent = '保存失败：' + error.message; }
+  finally { savingService = false; setBusy(busy); }
+}
+
+/** 展示当前地址的可用音色数量，忽略切换地址前仍在途的旧查询。 */
 async function loadVoiceInfo() {
+  const version = ++voiceInfoVersion;
+  $('voicePoolInfo').textContent = '正在查询当前服务的可用音色…';
   try {
     const result=await api('/api/voices');
+    if (version !== voiceInfoVersion) return;
     $('voicePoolInfo').textContent=`可用 ${result.voices.length} 个音色；每条请求随机选择，打乱后逐条使用，用尽后再打乱。${result.voices.length===1?'当前只有一个可用音色。':''}\n示例：${result.voices.slice(0,3).map(v=>v.voiceName).join('、')}`;
-  } catch(error) {$('voicePoolInfo').textContent='暂未获取可用音色：'+error.message+'。开始测试时会重新查询。';}
+  } catch(error) {if (version === voiceInfoVersion) $('voicePoolInfo').textContent='暂未获取可用音色：'+error.message+'。开始测试时会重新查询。';}
 }
 
 /** 通过一个共享播放器试听已下载音频，不重新访问远端 URL。 */
@@ -302,9 +346,12 @@ function previewAudio(event) {
 
 /** 载入凭据可用状态与最近任务，并绑定界面事件。 */
 async function init() {
+  $('serviceForm').addEventListener('submit', saveService);
+  $('ttsBaseUrl').addEventListener('input', () => { $('serviceStatus').textContent = '地址尚未保存。'; });
   $('configForm').addEventListener('submit', startTest);
   $('configForm').addEventListener('input', updatePlan);
   $('runMode').addEventListener('change', updateRunMode);
+  $('startMode').addEventListener('change', updateStartMode);
   $('textSource').addEventListener('change', () => { if (!$('text').readOnly) manualText = $('text').value; updateTextSource(); });
   $('stop').addEventListener('click', stopTest);
   $('clearHistory').addEventListener('click',clearHistory);
@@ -320,15 +367,16 @@ async function init() {
     updateTextSource();
     $('connection').textContent = configured ? '本地服务在线 · 凭据已加载' : '本地服务在线 · 未配置凭据';
     $('connection').className = 'connection ' + (configured ? 'ready' : 'bad');
-    $('baseUrl').textContent = config.baseUrl; $('voiceId').value = config.voiceId||'';
-    if(!config.features?.randomVoices||!config.features?.clearHistory) {
+    activeBaseUrl = config.baseUrl; $('baseUrl').textContent = activeBaseUrl; $('ttsBaseUrl').value = activeBaseUrl; $('voiceId').value = config.voiceId||'';
+    if(!config.features?.randomVoices||!config.features?.clearHistory||!config.features?.scheduledStart||!config.features?.editableBaseUrl) {
       configured=false;setBusy(false);$('clearHistory').disabled=true;
-      notice('当前服务版本较旧，请通过“启动测试台.cmd”打开新版测试台，再使用随机音色和清空历史。');return;
+      notice('当前服务版本较旧，请重启本地服务，再使用页面地址设置。');return;
     }
+    serviceReady = true;
     if(config.features?.randomVoices)void loadVoiceInfo();
     setBusy(false);
     const history = await loadHistory();
-    const latest = history.find(r => r.mode === 'duration' && ['running','warming'].includes(r.status)) || history.find(r=>r.mode==='duration');
+    const latest = history.find(r => ['running','warming','scheduled','preparing'].includes(r.status)) || history.find(r=>r.mode==='duration');
     if (latest) await poll(latest.id);
     if (!configured) notice('请在启动服务前配置 TTS_API_KEY，或用 TTS_DOC_PATH 指定含 Key 的原始文档。');
   } catch (e) { $('connection').textContent = '本地服务连接失败'; notice(e.message); }
