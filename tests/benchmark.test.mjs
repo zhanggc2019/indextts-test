@@ -88,7 +88,7 @@ async function fixture(t, corpus, settings={}) {
   }
   /** 启动测试并等待终态，默认每档三条请求。 */
   async function run(extra = {}) {
-    const start = await call('/api/runs',{voiceId:'voice_test',text:'正常测试',concurrencies:'1,3',requests:3,...extra});
+    const start = await call('/api/runs',{voiceId:'voice_test',text:'正常测试',concurrencies:'1,3',requests:3,downloadAudio:true,...extra});
     assert.equal(start.status,201);
     return until(async () => (await call('/api/runs/'+start.data.id)).data,r => !['warming','running'].includes(r.status));
   }
@@ -340,6 +340,9 @@ test('大于 64 并发实际进入上游，客户端连接池不截流且可手�
 
 test('配置校验与 WAV 内容检查', () => {
   const defaults = validateConfig({voiceId:'v',text:'测试'});
+  assert.equal(defaults.downloadAudio,false);
+  assert.equal(validateConfig({text:'测试',downloadAudio:true}).downloadAudio,true);
+  for (const downloadAudio of ['false','true',0,1,null]) assert.throws(()=>validateConfig({text:'测试',downloadAudio}),/downloadAudio/);
   assert.equal(defaults.synthTimeout,20); assert.equal(defaults.downloadTimeout,10);
   assert.equal(defaults.mode,'duration'); assert.equal(defaults.stageSeconds,600);
   assert.deepEqual(defaults.concurrencies,[4,8,16,24,32]);
@@ -440,6 +443,48 @@ test('预热时手动停止也生成报告，不把用户取消描述为预热�
   assert.match(fs.readFileSync(path.join(f.folder,run.id+'.md'),'utf8'),/用户手动停止/);
 });
 
+/** 验证默认模式不访问音频存储，预热、统计及持久化都采用获取链接的口径。 */
+test('默认跳过预热和正式下载，获取链接即成功，保存空下载指标和报告', async t => {
+  const f = await fixture(t);
+  assert.equal((await f.call('/api/config')).data.features.optionalAudioDownload,true);
+  const start = await f.call('/api/runs',{text:'FAIL_DOWNLOAD\nBAD_AUDIO\nSLOW_DOWNLOAD\nRELATIVE_URL',concurrencies:'1,2',requests:4,warmup:1});
+  assert.equal(start.status,201);
+  const run = await until(async () => (await f.call('/api/runs/'+start.data.id)).data, r => r.reportsReady);
+  assert.equal(run.status,'completed'); assert.equal(run.config.downloadAudio,false);
+  assert.equal(run.warmupDone,1); assert.equal(f.observed.calls,9);
+  assert.equal(f.observed.audioHeaders.length,0); assert.equal(run.overall.success,8);
+  assert.equal(run.overall.download.count,0); assert.equal(run.downloadFailureAnalysis.total,0);
+  assert.ok(run.results.every(r => r.status==='success' && r.synthOK && r.downloadSkipped && r.endedAt && r.e2eMs >= r.synthMs));
+  assert.ok(run.results.every(r => !r.localAudio && r.downloadMs == null && r.downloadAttemptMs == null && r.downloadTtfbMs == null && r.bytes == null && !r.downloadRequestUrl && !r.downloadFinalUrl));
+  assert.ok(run.results.every(r => r.audioUrl.startsWith('http://') && r.audioUrlOriginal && r.audioStorage==='minio'));
+  assert.ok(!fs.existsSync(path.join(f.folder,run.id)));
+  assert.equal((await fetch(f.base+`/api/runs/${run.id}/audio/1`)).status,404);
+  const md = fs.readFileSync(path.join(f.folder,run.id+'.md'),'utf8');
+  assert.match(md,/关闭（拿到音频链接即成功）/); assert.match(md,/获取链接成功率：100.00%/);
+  assert.match(md,/全流程耗时：单条请求开始合成至获取音频链接/);
+  assert.doesNotMatch(md,/所有请求均完整下载|音频读取并校验完成/);
+  for (const row of run.results) assert.ok(md.includes(row.audioUrlOriginal));
+  const saved = JSON.parse(fs.readFileSync(path.join(f.folder,run.id+'.json'),'utf8'));
+  assert.equal(saved.config.downloadAudio,false); assert.equal(saved.results[0].downloadSkipped,true);
+  const csv = fs.readFileSync(path.join(f.folder,run.id+'.csv'),'utf8');
+  assert.match(csv,/downloadAudio,downloadSkipped/);
+  const headers = csv.replace(/^\uFEFF/,'').split('\r\n')[0].split(',');
+  const values = csv.split('\r\n')[1].match(/"(?:[^"]|"")*"/g);
+  assert.equal(values[headers.indexOf('downloadAudio')],'"false"');
+  assert.equal(values[headers.indexOf('downloadMs')],'""');
+  assert.ok(run.summary.every(s => s.download.count===0 && s.ttfb.count===0));
+});
+
+/** 跳过下载只改变成功终点，合成和链接校验失败仍应计为失败。 */
+test('跳过下载仍拒绝合成失败、缺失或异常音频链接，且不产生下载失败', async t => {
+  const f = await fixture(t);
+  const run = await f.run({downloadAudio:false,concurrencies:'1',requests:4,text:'FAIL_SYNTH\nNO_URL\nBAD_URL\n正常测试'});
+  assert.deepEqual(run.results.map(r => r.status),['failed','failed','failed','success']);
+  assert.equal(f.observed.calls,4); assert.equal(f.observed.audioHeaders.length,0);
+  assert.match(run.results[1].error,/audio_url/);
+  assert.equal(run.downloadFailureAnalysis.total,0);
+});
+
 test('真实工作池遵守并发阶梯，下载完整内容且不传密钥，报告和录音可读取', async t => {
   const f = await fixture(t); const run = await f.run();
   assert.equal(run.status,'completed'); assert.equal(run.results.filter(r=>r.status==='success').length,6);
@@ -537,7 +582,7 @@ test('下载已经收到部分音频也必须按总截止时间中止，并继�
 
 test('手动取消下载有独立诊断，但不混入下载失败或超时专项统计',async t=>{
   const f=await fixture(t);
-  const start=await f.call('/api/runs',{voiceId:'voice_test',text:'SLOW_DOWNLOAD',concurrencies:'1',requests:1});
+  const start=await f.call('/api/runs',{voiceId:'voice_test',text:'SLOW_DOWNLOAD',concurrencies:'1',requests:1,downloadAudio:true});
   await until(async()=>f.observed.audioHeaders.length,n=>n>0);
   await f.call(`/api/runs/${start.data.id}/stop`,{});
   const run=await until(async()=>(await f.call('/api/runs/'+start.data.id)).data,r=>r.status==='cancelled');

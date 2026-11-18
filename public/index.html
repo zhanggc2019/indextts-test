@@ -35,6 +35,8 @@
             <div id="singleFields" class="field-grid" hidden><div><label for="singleConcurrency">固定并发数</label><input id="singleConcurrency" name="singleConcurrency" type="number" value="4" min="1" step="1" required disabled></div><div><label for="singleHours">持续时间 / 小时</label><input id="singleHours" name="singleHours" type="number" value="1" min="0.01" max="168" step="0.01" required disabled></div></div>
             <p class="plan" id="plan">5 轮 × 10 分钟 = 50 分钟持续发压；各轮收尾另计。</p>
             <p class="hint" id="scheduleHint">每个请求结束后自动补位，到时自动进入下一轮；请求数由实际响应速度决定。</p>
+            <label for="downloadAudio">测试音频下载</label><select id="downloadAudio" name="downloadAudio" aria-describedby="downloadHint"><option value="false" selected>关闭 · 拿到链接即成功（默认）</option><option value="true">开启 · 合成并下载音频</option></select>
+            <p class="hint" id="downloadHint">关闭后，预热和正式测试均不下载音频；合成成功并返回音频链接即通过，不保存本地录音。</p>
             <label for="startMode">启动方式</label><select id="startMode"><option value="now">立即开始</option><option value="scheduled">定时开始 · 一次性预约</option></select>
             <div id="scheduledFields" hidden><label for="scheduledAt">开始日期和时间 · 本机时区</label><input id="scheduledAt" type="datetime-local" disabled><p class="hint">关闭页面不影响预约；须保持本地服务运行、电脑唤醒。服务重启或错过时间超过 1 分钟不会补跑。</p></div>
             <details><summary>更多参数 <span>语言 / 语速 / 超时</span></summary><div class="field-grid advanced">
@@ -59,9 +61,9 @@
         <p id="reportNote" class="hint report-note">所有轮次归属同一测试，结束后自动保存一份汇总报告；关闭页面后本地服务会继续运行。</p>
         <div id="notice" class="notice" role="alert" hidden></div>
         <div class="metrics">
-          <article><p>全流程成功率</p><strong id="mSuccess">—</strong><small id="mCount">等待首次请求</small></article>
+          <article><p id="successLabel">全流程成功率</p><strong id="mSuccess">—</strong><small id="mCount">等待首次请求</small></article>
           <article><p>平均合成耗时 <span title="包括服务端排队和网络，非纯模型推理时间">ⓘ</span></p><strong id="mSynth">—</strong><small>完整 JSON 返回</small></article>
-          <article><p>平均下载耗时</p><strong id="mDownload">—</strong><small>URL → 完整音频</small></article>
+          <article><p>平均下载耗时</p><strong id="mDownload">—</strong><small id="downloadMetricNote">URL → 完整音频</small></article>
           <article><p>合成 P95</p><strong id="mP95">—</strong><small>成功合成样本</small></article>
         </div>
         <section class="panel observation">

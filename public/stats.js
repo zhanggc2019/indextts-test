@@ -58,6 +58,7 @@ export function analyzeDownloadFailures(run,limit=Infinity) {
 
 /** 为每条下载失败输出 URL、观测阶段、字节进度、重定向链和事件时间线。 */
 function downloadFailureChapter(run) {
+  if (run.config.downloadAudio === false) return ['## 下载失败专项分析', '', '本场已关闭下载测试，未发起音频下载，未验证链接可下载性。', ''];
   const analysis=analyzeDownloadFailures(run);
   const kinds={timeout:'超时',network:'网络异常',http:'HTTP 异常',validation:'内容/URL 校验失败'};
   const lines=['## 下载失败专项分析','',`- 下载失败：${analysis.total} 条，其中超时 ${analysis.timeouts} 条。`,
@@ -154,6 +155,7 @@ function date(value) { return value ? new Date(value).toLocaleString('zh-CN', { 
 /** 生成一份包含整场总览、五档对比、失败和全部明细的汇总报告。 */
 export function markdownReport(run) {
   const stats = summarize(run), timed = run.config.mode === 'duration';
+  const downloadAudio = run.config.downloadAudio !== false;
   const source = run.config.textCorpus;
   const totals = stats.reduce((a, s) => ({ attempted:a.attempted+s.attempted, success:a.success+s.success,
     failed:a.failed+s.failed, timedOut:a.timedOut+s.timedOut, cancelled:a.cancelled+s.cancelled }),
@@ -181,33 +183,36 @@ export function markdownReport(run) {
     timed ? `- 每档持续发压：${run.config.stageSeconds} 秒；计划发压合计 ${run.config.stageSeconds * run.stages.length / 60} 分钟；各档收尾另计` :
       `- 每档计划请求数：${run.config.requests}`,
     `- 串行预热：${run.config.warmup} 次（不计统计）`,
-    `- 超时：合成 ${run.config.synthTimeout} 秒，下载 ${run.config.downloadTimeout} 秒`,
+    `- 测试音频下载：${downloadAudio ? '开启（合成并下载音频）' : '关闭（拿到音频链接即成功）'}`,
+    `- 超时：合成 ${run.config.synthTimeout} 秒，下载 ${downloadAudio ? run.config.downloadTimeout + ' 秒' : '未测试'}`,
     `- 请求音频交付：${run.config.audioDelivery || '历史未记录'}；用途：${run.config.audioPurpose || '历史未记录'}；实际存储以每条响应的 audio_storage 为准`,
     `- 文本来源：${source ? `${source.sourceFile}，${source.column}列；${source.count} 条有效语料` : '手动输入'}`,
     ...(source ? [`- 抽样种子：${run.config.samplingSeed}`, `- 语料 SHA256：${source.corpusSha256}`, `- 原始 CSV SHA256：${source.sourceSha256}`] : []), '',
     '## 整场汇总', '',
     `- 已启动：${totals.attempted}；成功：${totals.success}；失败：${totals.failed}（其中超时 ${totals.timedOut}）；取消：${totals.cancelled}`,
-    `- 全流程成功率：${totals.attempted ? (totals.success/totals.attempted*100).toFixed(2)+'%' : '—'}`,
+    `- ${downloadAudio ? '全流程' : '获取链接'}成功率：${totals.attempted ? (totals.success/totals.attempted*100).toFixed(2)+'%' : '—'}`,
     `- 合成均值 / P50 / P95：${seconds(synth.mean)} / ${seconds(synth.p50)} / ${seconds(synth.p95)} 秒`,
     `- 下载均值 / P95：${seconds(download.mean)} / ${seconds(download.p95)} 秒`,
     best ? `- 本轮已完成档位中最高成功吞吐量：并发 ${best.concurrency}，${best.rps.toFixed(3)} 次/秒。` : '- 尚无已完成且成功的档位。', '',
-    '## 各档对比', '', '时间单位为秒。超时计入失败；成功要求合成及完整音频下载、内容校验均通过。', '',
+    '## 各档对比', '', downloadAudio ? '时间单位为秒。超时计入失败；成功要求合成及完整音频下载、内容校验均通过。' : '时间单位为秒。超时计入失败；成功要求合成成功并返回音频链接，不验证链接可下载性。下载指标无样本，显示“—”。', '',
     '| 并发/峰值 | 状态 | 发压/收尾 | 已启动 | 成功 | 失败/超时 | 合成均值 | 合成 P50 | 合成 P95 | 下载均值 | 下载 P95 | 全流程均值 | 成功 RPS | 平均字数 |',
     '|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
     ...stats.map(s=>`| ${s.concurrency}/${s.peakActive} | ${s.state} | ${s.admissionSeconds.toFixed(2)}/${s.drainSeconds.toFixed(2)} | ${s.attempted} | ${s.success} | ${s.failed}/${s.timedOut} | ${seconds(s.synth.mean)} | ${seconds(s.synth.p50)} | ${seconds(s.synth.p95)} | ${seconds(s.download.mean)} | ${seconds(s.download.p95)} | ${seconds(s.e2e.mean)} | ${s.rps?.toFixed(3) ?? '—'} | ${s.textChars.mean?.toFixed(1) ?? '—'} |`), '',
     '## 执行与测量口径', '',
     ...(timed ? [
       '- 每档为固定并发工作池：请求完成或超时后立即补位，持续发起请求至该档计时截止；总请求数随响应速度变化，不预设次数。',
-      '- 到时停止新增请求，等待本档在途请求按原有超时限制结束，再自动进入下一档；各档在途请求不重叠。单条网络等待合计最多 30 秒，因此总时长为计划发压时长加各档收尾。',
+      `- 到时停止新增请求，等待本档在途请求按原有超时限制结束，再自动进入下一档；各档在途请求不重叠。单条网络等待合计最多 ${downloadAudio ? 30 : 20} 秒，因此总时长为计划发压时长加各档收尾。`,
       '- 新请求遇到失败后，该槽位最多间隔 1 秒再取新文本发起下一条请求；不自动重试原请求。冷却包含在档位墙钟中。',
       '- CSV 语料按种子洗牌后依次使用，用尽后重新洗牌循环；每个档位从相同序列起点取词，快慢不同的档位最终请求数可以不同。',
-      '- 每档仅保留前 3 条成功下载且对应请求序号不大于 3 的本地录音；所有请求均完整下载并计时，全部原始文本与计时保留。',
+      downloadAudio ? '- 每档仅保留前 3 条成功下载且对应请求序号不大于 3 的本地录音；所有请求均完整下载并计时，全部原始文本与计时保留。' : '- 预热和正式测试均跳过音频下载、内容校验及本地录音保存；保留返回的音频链接和合成元数据。',
       '- 任务由本地服务执行，关闭页面不会停止任务；退出本地服务或电脑休眠会影响测试。进行中每 5 秒保存一次快照，结束后自动保存整场 Markdown、CSV、JSON。'
     ] : ['- 各档固定请求数，按并发工作池顺序执行；不自动重试。', '- 各并发档位复用同组文本序列。']),
     '- 合成耗时：本地服务发起 POST 至完整 JSON 读取结束；包含连接、服务端排队、推理、可能的字幕对齐/存储交付及传输，不能分离纯模型推理时间。',
-    '- 下载耗时：音频 URL GET 开始至完整响应体读入内存；包含重定向，不包含写盘。下载请求不携带 API Key。',
-    '- 下载 TTFB：从 GET 开始到最终响应的第一个非空数据块；JSON/CSV 明细包含此项。',
-    '- 全流程耗时：单条请求开始合成至音频读取并校验完成；不含本地排队和写盘。',
+    ...(downloadAudio ? ['- 下载耗时：音频 URL GET 开始至完整响应体读入内存；包含重定向，不包含写盘。下载请求不携带 API Key。',
+      '- 下载 TTFB：从 GET 开始到最终响应的第一个非空数据块；JSON/CSV 明细包含此项。',
+      '- 全流程耗时：单条请求开始合成至音频读取并校验完成；不含本地排队和写盘。'] : [
+      '- 下载耗时和 TTFB：未测试，留空，不以 0 毫秒计入统计。',
+      '- 全流程耗时：单条请求开始合成至获取音频链接；不含音频下载。预热同样只要求获取链接。']),
     '- 成功 RPS = 档位全流程成功数 / 档位实际墙钟时长，包含收尾、调度、失败冷却和抽样录音写盘；成功率分母为已启动请求数。',
     '- 合成分位数只包含合成成功样本；下载及全流程分位数只包含全流程成功样本。失败尝试耗时不混入成功分位数。',
     '- 百分位采用最近秩算法（nearest-rank）；发压截止和请求计时使用单调时钟。',
@@ -239,6 +244,6 @@ function cell(value) {
 
 /** 导出整场所有档位的原始请求，统一使用毫秒计时。 */
 export function csvReport(run) {
-  const fields = ['id','concurrency','stageRequest','voiceId','voiceName','text','textChars','sourceRecord','sourceId','status','timedOut','phase','startedAt','synthOK','synthHttpStatus','downloadHttpStatus','synthMs','synthAttemptMs','downloadMs','downloadAttemptMs','downloadTtfbMs','downloadFailureStage','downloadFailureKind','downloadErrorCode','audioUrlOriginal','audioUrl','downloadRequestUrl','downloadFinalUrl','audioUrlNote','downloadReceivedBytes','downloadExpectedBytes','downloadContentType','downloadDiagnostics','e2eMs','queueMs','bytes','audioDurationMs','audioId','audioStorage','audioCreatedAt','audioExpiresAt','serverAudioDurationMs','serverAudioSizeBytes','subtitleMode','subtitleStorage','subtitleCount','subtitleUrl','subtitles','requestId','ttsWorker','ttsBatchId','ttsBatchSize','serverTiming','retryAfter','error'];
-  return '\uFEFF' + [fields.join(','),...run.results.map(r=>fields.map(k=>cell(k === 'concurrency' ? run.stages[r.stage].concurrency : k==='audioUrlNote'?audioUrlMissingReason(r):['downloadDiagnostics','subtitles'].includes(k)&&r[k]!=null?JSON.stringify(r[k]):r[k])).join(','))].join('\r\n');
+  const fields = ['id','concurrency','stageRequest','voiceId','voiceName','text','textChars','sourceRecord','sourceId','status','timedOut','phase','startedAt','synthOK','synthHttpStatus','downloadHttpStatus','synthMs','synthAttemptMs','downloadMs','downloadAttemptMs','downloadTtfbMs','downloadFailureStage','downloadFailureKind','downloadErrorCode','audioUrlOriginal','audioUrl','downloadRequestUrl','downloadFinalUrl','audioUrlNote','downloadReceivedBytes','downloadExpectedBytes','downloadContentType','downloadDiagnostics','e2eMs','queueMs','bytes','audioDurationMs','audioId','audioStorage','audioCreatedAt','audioExpiresAt','serverAudioDurationMs','serverAudioSizeBytes','subtitleMode','subtitleStorage','subtitleCount','subtitleUrl','subtitles','requestId','ttsWorker','ttsBatchId','ttsBatchSize','serverTiming','retryAfter','error','downloadAudio','downloadSkipped'];
+  return '\uFEFF' + [fields.join(','),...run.results.map(r=>fields.map(k=>cell(k === 'downloadAudio' ? run.config.downloadAudio !== false : k === 'concurrency' ? run.stages[r.stage].concurrency : k==='audioUrlNote'?audioUrlMissingReason(r):['downloadDiagnostics','subtitles'].includes(k)&&r[k]!=null?JSON.stringify(r[k]):r[k])).join(','))].join('\r\n');
 }

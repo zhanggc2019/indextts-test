@@ -97,6 +97,8 @@ export function validateConfig(input, corpus = null) {
   const lang = String(input.lang || 'ZH').toUpperCase();
   if (!['ZH','EN','JA','ES','AR'].includes(lang)) throw new Error('语言参数无效');
   const config = { mode, runMode, concurrencies, requests, stageSeconds, texts, voiceMode, voiceId, lang, textSource };
+  if (input.downloadAudio !== undefined && typeof input.downloadAudio !== 'boolean') throw new Error('downloadAudio 须为布尔值');
+  config.downloadAudio = input.downloadAudio ?? false;
   if (input.scheduledAt != null && input.scheduledAt !== '') {
     if (typeof input.scheduledAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})$/.test(input.scheduledAt)) throw new Error('预约时间须为带时区的 ISO 日期时间');
     config.scheduledAt = Date.parse(input.scheduledAt);
@@ -303,6 +305,15 @@ export function createApp(options) {
       if (typeof result.audio_url !== 'string' || !result.audio_url) throw new Error('合成响应缺少 audio_url');
       row.audioUrl = result.audio_url;
       row.synthOK = true; row.synthMs = res.ms;
+      if (run.config.downloadAudio === false) {
+        const audioUrl = new URL(row.audioUrl, opts.baseUrl);
+        if (!['http:', 'https:'].includes(audioUrl.protocol)) throw new Error('音频链接须为 HTTP/HTTPS 地址');
+        row.audioUrl = audioUrl.href;
+        row.downloadSkipped = true;
+        row.e2eMs = performance.now() - begin;
+        row.status = 'success'; row.phase = 'complete';
+        return;
+      }
       row.status = 'downloading'; row.phase = 'download'; phaseStart = performance.now();
       let audio;
       try {
@@ -351,8 +362,9 @@ export function createApp(options) {
         row.timedOut = true;
         row.error = `${row.phase === 'synthesis' ? '合成' : '下载'}超时（${row.phase === 'synthesis' ? run.config.synthTimeout : run.config.downloadTimeout} 秒），已中断等待`;
       }
+    } finally {
+      row.endedAt = Date.now();
     }
-    row.endedAt = Date.now();
   }
 
   /** 统一收尾和保存报告，预约取消或启动失败时也留下可查看的记录。 */
@@ -420,7 +432,7 @@ export function createApp(options) {
         const deadline = timed ? stageClock + run.config.stageSeconds * 1000 : Infinity;
         if (timed) stage.deadlineAt = stage.startedAt + run.config.stageSeconds * 1000;
         const rows = run.results.filter(r => r.stage === stage.index);
-        /** 每个工作槽位完成整条合成和下载后才取下一条请求。 */
+        /** 每个工作槽位完成所选测试流程后才取下一条请求。 */
         async function worker() {
           while (!signal.aborted && (timed ? performance.now() < deadline : cursor < rows.length)) {
             const index = cursor++;
@@ -468,7 +480,7 @@ export function createApp(options) {
         baseUrl: opts.baseUrl, hasKey: Boolean(opts.apiKey), endpoint: '/api/v1/tts/synthesize',
         timeoutPolicy: { synthTimeout: 20, downloadTimeout: 10 },
         benchmarkMode: 'duration', defaultConcurrencies: [4,8,16,24,32], defaultStageSeconds: 600,
-        features: { manualStopReport: true, singleConcurrencyHours: true, downloadDiagnostics: true, successAudioUrls: true, apiGuide20261030: true, allAudioUrls: true, minioDeliveryHeaders: true, randomVoices: true, clearHistory: true, unrestrictedConcurrency: true, scheduledStart: true, editableBaseUrl: true },
+        features: { manualStopReport: true, singleConcurrencyHours: true, downloadDiagnostics: true, successAudioUrls: true, apiGuide20261030: true, allAudioUrls: true, minioDeliveryHeaders: true, randomVoices: true, clearHistory: true, unrestrictedConcurrency: true, scheduledStart: true, editableBaseUrl: true, optionalAudioDownload: true },
         textCorpus: corpus ? { sourceFile: corpus.sourceFile, column: corpus.column, count: corpus.entries.length,
           minChars: Math.min(...corpus.entries.map(e => Array.from(e.text).length)), maxChars: Math.max(...corpus.entries.map(e => Array.from(e.text).length)),
           examples: corpus.entries.slice(0, 2).map(e => e.text) } : null });

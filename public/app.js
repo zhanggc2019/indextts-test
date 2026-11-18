@@ -55,9 +55,16 @@ function updateRunMode() {
 /** 根据当前模式显示明确的计划和持续时间，不预估请求总数。 */
 function updatePlan() {
   const plan = currentPlan();
+  const downloadAudio = $('downloadAudio').value !== 'false';
+  $('downloadTimeout').disabled = !downloadAudio;
   $('plan').textContent = plan.description;
   $('scheduleHint').textContent = plan.single ? '始终按固定并发补位，到时收尾并生成报告；也可随时手动停止。' : '每个请求结束后自动补位，到时自动进入下一轮；请求数由实际响应速度决定。';
   $('runNote').textContent = plan.single ? '合成上限 20 秒，下载上限 10 秒。到时停止新增请求并收尾；手动停止会取消在途连接并生成部分报告。' : '合成上限 20 秒，下载上限 10 秒。超时记为失败后继续；本轮在途请求结束后再切换下一轮。';
+  if (!downloadAudio) $('runNote').textContent = '仅测试合成，拿到音频链接即成功；合成上限 20 秒，不发起下载，也不保存本地录音。';
+  if (!current) {
+    $('successLabel').textContent = downloadAudio ? '全流程成功率' : '获取链接成功率';
+    $('downloadMetricNote').textContent = downloadAudio ? 'URL → 完整音频' : '已跳过下载测试';
+  }
   if (!busy) $('start').innerHTML = `<span>▶</span> ${esc($('startMode').value === 'scheduled' ? '预约定时测试' : plan.label)}`;
   if (!current || !busy) drawStages(plan.stages.map(concurrency=>({concurrency,state:'pending'})), plan.seconds);
   $('charCount').textContent = `${Array.from($('text').value).length} 字`;
@@ -149,6 +156,7 @@ function renderDownloadFailures(run) {
   $('downloadFailureCount').textContent=`${analysis.total} 失败 · ${analysis.timeouts} 超时`;
   $('exportDownloadFailures').disabled=!analysis.total;
   $('downloadFailureNote').textContent=`以下是客户端观测到的失败阶段，不直接认定远端根因。用户取消下载 ${analysis.cancelled} 条，单列统计；历史缺少阶段记录 ${analysis.unknown} 条。页面最多显示最近 100 条，导出报告包含全部。`;
+  if (run.config.downloadAudio === false) $('downloadFailureNote').textContent = '本场已关闭下载测试，未发起音频下载，未验证链接可下载性。';
   $('downloadFailureGroups').innerHTML=analysis.groups.map(g=>`<span>${esc(g.label)} <b>${g.count}</b></span>`).join('');
   const kinds={timeout:'超时',network:'网络异常',http:'HTTP 异常',validation:'校验失败'};
   $('downloadFailureBody').innerHTML=analysis.failures.slice(-100).map(r=>{
@@ -171,6 +179,7 @@ function render(run) {
     for (const key of ['voiceId','lang','warmup','speechRate','loudnessRate']) $(key).value = run.config[key];
     $('synthTimeout').value = Math.min(Number(run.config.synthTimeout) || 20, 20);
     $('downloadTimeout').value = Math.min(Number(run.config.downloadTimeout) || 10, 10);
+    $('downloadAudio').value = String(run.config.downloadAudio ?? false);
     if (run.config.mode === 'duration') {
       const single = run.config.runMode === 'single' || run.config.concurrencies.length === 1;
       $('runMode').value = single ? 'single' : 'ladder';
@@ -191,6 +200,8 @@ function render(run) {
   const totals = run.overall || {attempted:attempted.length,success:success.length,failed:run.results.filter(r=>r.status==='failed').length,timedOut:run.results.filter(r=>r.timedOut).length,total:run.results.length};
   const synth = run.overall?.synth || distribution(run.results.filter(r => r.synthOK).map(r => r.synthMs));
   const download = run.overall?.download || distribution(success.map(r => r.downloadMs));
+  $('successLabel').textContent = run.config.downloadAudio === false ? '获取链接成功率' : '全流程成功率';
+  $('downloadMetricNote').textContent = run.config.downloadAudio === false ? '已跳过下载测试' : 'URL → 完整音频';
   $('mSuccess').innerHTML = totals.attempted ? `${(totals.success/totals.attempted*100).toFixed(1)}<em>%</em>` : '—';
   $('mCount').textContent = `${totals.success} 成功 / ${totals.attempted} 已启动 · ${totals.failed} 失败`;
   $('mSynth').innerHTML = synth.count ? `${seconds(synth.mean)}<em>s</em>` : '—';
@@ -210,6 +221,7 @@ function render(run) {
   drawStages(run.summary, timed ? run.config.stageSeconds : 0);
   $('reportNote').textContent = run.reportsReady ? run.status === 'cancelled' ? '已保存停止时的部分报告：包含已完成结果、在途取消记录及未执行轮次。下方可导出 Markdown、CSV 和 JSON。' : '整场汇总报告已自动保存。下方可导出所有轮次的 Markdown、CSV 和 JSON。' : active ? '本地服务持续运行并自动保存进度；到时自动结束，也可随时点击“停止并生成报告”。' : '当前显示历史结果；新测试采用上方持续时间配置。';
   if (scheduled) $('reportNote').textContent = `将在 ${scheduledTime}（本机时间）启动，包含预热；当前不会发起合成请求。可取消预约，须保持服务运行、电脑唤醒。`;
+  if (run.config.downloadAudio === false) $('reportNote').textContent += ' 本场已关闭下载测试，拿到音频链接即成功；全流程耗时截至获取链接，未验证音频能否下载。';
   $('exportMd').textContent = run.status === 'cancelled' ? '↓ 停止报告 .md' : '↓ 汇总报告 .md';
   drawChart(run.summary);
   $('summaryBody').innerHTML = run.summary.map(s => `<tr><td>${s.concurrency} / ${s.peakActive}</td><td>${s.attempted} / ${s.success}</td><td>${s.failed} / ${s.timedOut}</td><td>${clock(s.admissionSeconds)} / ${s.drainSeconds.toFixed(1)}s</td><td>${seconds(s.synth.mean)} s</td><td>${seconds(s.synth.p95)} s</td><td>${seconds(s.download.mean)} s</td><td>${seconds(s.e2e.mean)} s</td><td>${s.rps === null ? '—' : s.rps.toFixed(3)}</td></tr>`).join('');
@@ -252,6 +264,7 @@ async function startTest(event) {
   event.preventDefault(); if (busy || savingService) return;
   if ($('ttsBaseUrl').value.trim().replace(/\/+$/, '') !== activeBaseUrl.replace(/\/+$/, '')) { notice('TTS 地址尚未保存，请先点击“保存地址”。'); return; }
   const input = Object.fromEntries(new FormData($('configForm')));
+  input.downloadAudio = input.downloadAudio === 'true';
   if (input.runMode === 'single') { input.concurrencies = input.singleConcurrency; input.stageSeconds = Number(input.singleHours) * 3600; }
   if (input.textSource === 'manual') manualText = input.text;
   if ($('startMode').value === 'scheduled') {
@@ -352,6 +365,7 @@ async function init() {
   $('configForm').addEventListener('input', updatePlan);
   $('runMode').addEventListener('change', updateRunMode);
   $('startMode').addEventListener('change', updateStartMode);
+  $('downloadAudio').addEventListener('change', updatePlan);
   $('textSource').addEventListener('change', () => { if (!$('text').readOnly) manualText = $('text').value; updateTextSource(); });
   $('stop').addEventListener('click', stopTest);
   $('clearHistory').addEventListener('click',clearHistory);
@@ -368,9 +382,9 @@ async function init() {
     $('connection').textContent = configured ? '本地服务在线 · 凭据已加载' : '本地服务在线 · 未配置凭据';
     $('connection').className = 'connection ' + (configured ? 'ready' : 'bad');
     activeBaseUrl = config.baseUrl; $('baseUrl').textContent = activeBaseUrl; $('ttsBaseUrl').value = activeBaseUrl; $('voiceId').value = config.voiceId||'';
-    if(!config.features?.randomVoices||!config.features?.clearHistory||!config.features?.scheduledStart||!config.features?.editableBaseUrl) {
+    if(!config.features?.randomVoices||!config.features?.clearHistory||!config.features?.scheduledStart||!config.features?.editableBaseUrl||!config.features?.optionalAudioDownload) {
       configured=false;setBusy(false);$('clearHistory').disabled=true;
-      notice('当前服务版本较旧，请重启本地服务，再使用页面地址设置。');return;
+      notice('当前服务版本较旧，请重启本地服务，再使用下载测试开关。');return;
     }
     serviceReady = true;
     if(config.features?.randomVoices)void loadVoiceInfo();
