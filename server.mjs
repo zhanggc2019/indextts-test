@@ -99,6 +99,9 @@ export function validateConfig(input, corpus = null) {
   const config = { mode, runMode, concurrencies, requests, stageSeconds, texts, voiceMode, voiceId, lang, textSource };
   if (input.downloadAudio !== undefined && typeof input.downloadAudio !== 'boolean') throw new Error('downloadAudio 须为布尔值');
   config.downloadAudio = input.downloadAudio ?? false;
+  const intervalSilence = input.intervalSilence ?? 200;
+  if (!['number','string'].includes(typeof intervalSilence) || !String(intervalSilence).trim() || !Number.isInteger(Number(intervalSilence)) || Number(intervalSilence) < 0 || Number(intervalSilence) > 1000) throw new Error('intervalSilence 须为 0～1000 的整数（毫秒）');
+  config.intervalSilence = Number(intervalSilence);
   if (input.scheduledAt != null && input.scheduledAt !== '') {
     if (typeof input.scheduledAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})$/.test(input.scheduledAt)) throw new Error('预约时间须为带时区的 ISO 日期时间');
     config.scheduledAt = Date.parse(input.scheduledAt);
@@ -276,7 +279,8 @@ export function createApp(options) {
       const voice=voiceSampler(warmup?row.id-1:row.stageRequest-1,warmup);
       row.voiceId=voice.voiceId;row.voiceName=voice.voiceName;
       const body = JSON.stringify({ voice_id: row.voiceId, text: row.text,
-        lang: run.config.lang, speech_rate: run.config.speechRate, loudness_rate: run.config.loudnessRate });
+        lang: run.config.lang, speech_rate: run.config.speechRate, loudness_rate: run.config.loudnessRate,
+        interval_silence: run.config.intervalSilence });
       const res = await requestBuffer(`${opts.baseUrl.replace(/\/$/, '')}/api/v1/tts/synthesize`, {
         method: 'POST', headers: { 'X-API-Key': opts.apiKey, 'X-Audio-Delivery': 'minio', 'X-Audio-Purpose': 'live_socket', 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
         body, timeoutMs: run.config.synthTimeout * 1000, signal, maxBytes: 1024 * 1024 });
@@ -480,7 +484,7 @@ export function createApp(options) {
         baseUrl: opts.baseUrl, hasKey: Boolean(opts.apiKey), endpoint: '/api/v1/tts/synthesize',
         timeoutPolicy: { synthTimeout: 20, downloadTimeout: 10 },
         benchmarkMode: 'duration', defaultConcurrencies: [4,8,16,24,32], defaultStageSeconds: 600,
-        features: { manualStopReport: true, singleConcurrencyHours: true, downloadDiagnostics: true, successAudioUrls: true, apiGuide20261030: true, allAudioUrls: true, minioDeliveryHeaders: true, randomVoices: true, clearHistory: true, unrestrictedConcurrency: true, scheduledStart: true, editableBaseUrl: true, optionalAudioDownload: true },
+        features: { manualStopReport: true, singleConcurrencyHours: true, downloadDiagnostics: true, successAudioUrls: true, apiGuide20261030: true, allAudioUrls: true, minioDeliveryHeaders: true, randomVoices: true, clearHistory: true, unrestrictedConcurrency: true, scheduledStart: true, editableBaseUrl: true, optionalAudioDownload: true, configurableIntervalSilence: true },
         textCorpus: corpus ? { sourceFile: corpus.sourceFile, column: corpus.column, count: corpus.entries.length,
           minChars: Math.min(...corpus.entries.map(e => Array.from(e.text).length)), maxChars: Math.max(...corpus.entries.map(e => Array.from(e.text).length)),
           examples: corpus.entries.slice(0, 2).map(e => e.text) } : null });

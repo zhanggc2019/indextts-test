@@ -25,7 +25,7 @@ function Invoke-RestMethod {
     $script:lookupCount++
     if ($script:lookupCount -gt 1) { throw '没有运行中的模拟服务' }
     $features = @{}
-    foreach ($name in @('singleConcurrencyHours','downloadDiagnostics','allAudioUrls','apiGuide20261030','minioDeliveryHeaders','randomVoices','clearHistory','unrestrictedConcurrency','scheduledStart','editableBaseUrl','optionalAudioDownload')) { $features[$name] = $true }
+    foreach ($name in @('singleConcurrencyHours','downloadDiagnostics','allAudioUrls','apiGuide20261030','minioDeliveryHeaders','randomVoices','clearHistory','unrestrictedConcurrency','scheduledStart','editableBaseUrl','optionalAudioDownload','configurableIntervalSilence')) { $features[$name] = $true }
     return @{endpoint='/api/v1/tts/synthesize';textCorpus=@{sourceFile='task-media-20261030.csv'};timeoutPolicy=@{synthTimeout=20;downloadTimeout=10};benchmarkMode='duration';features=$features;hasKey=$scenario.existingHasKey}
 }
 # 记录复用，不打开真实浏览器。

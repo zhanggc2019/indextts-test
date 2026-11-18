@@ -37,6 +37,8 @@
             <p class="hint" id="scheduleHint">每个请求结束后自动补位，到时自动进入下一轮；请求数由实际响应速度决定。</p>
             <label for="downloadAudio">测试音频下载</label><select id="downloadAudio" name="downloadAudio" aria-describedby="downloadHint"><option value="false" selected>关闭 · 拿到链接即成功（默认）</option><option value="true">开启 · 合成并下载音频</option></select>
             <p class="hint" id="downloadHint">关闭后，预热和正式测试均不下载音频；合成成功并返回音频链接即通过，不保存本地录音。</p>
+            <label for="intervalSilence">段间静音 / 毫秒</label><input id="intervalSilence" name="intervalSilence" type="number" value="200" min="0" max="1000" step="1" required aria-describedby="intervalSilenceHint">
+            <p class="hint" id="intervalSilenceHint">interval_silence，默认 200，范围 0～1000。控制生成片段之间补入的静音，0 表示不额外补静音；音频时长变化不等于推理耗时变化。</p>
             <label for="startMode">启动方式</label><select id="startMode"><option value="now">立即开始</option><option value="scheduled">定时开始 · 一次性预约</option></select>
             <div id="scheduledFields" hidden><label for="scheduledAt">开始日期和时间 · 本机时区</label><input id="scheduledAt" type="datetime-local" disabled><p class="hint">关闭页面不影响预约；须保持本地服务运行、电脑唤醒。服务重启或错过时间超过 1 分钟不会补跑。</p></div>
             <details><summary>更多参数 <span>语言 / 语速 / 超时</span></summary><div class="field-grid advanced">

@@ -166,10 +166,11 @@ test('预约校验拒绝过去、无时区及非法时间，并保留绝对时�
 // 到点后才查询音色和预热，等待预约不计入测试时间。
 test('一次性预约到点启动，预热和各档完整执行且阻止重复开测和清空',async t=>{
   const f=await fixture(t);const scheduledAt=Date.now()+600;
-  const start=await f.call('/api/runs',{text:'正常测试',concurrencies:'1,2',requests:2,warmup:1,scheduledAt:new Date(scheduledAt).toISOString()});
+  const start=await f.call('/api/runs',{text:'正常测试',concurrencies:'1,2',requests:2,warmup:1,intervalSilence:350,scheduledAt:new Date(scheduledAt).toISOString()});
   assert.equal(start.status,201);
   const waiting=(await f.call('/api/runs/'+start.data.id+'?compact=1')).data;
   assert.equal(waiting.status,'scheduled');assert.equal(waiting.startedAt,null);
+  assert.equal(waiting.config.intervalSilence,350);
   assert.equal(f.observed.calls,0);assert.equal(f.observed.voiceCalls,0);
   assert.equal(JSON.parse(fs.readFileSync(path.join(f.folder,start.data.id+'.json'),'utf8')).status,'scheduled');
   assert.equal((await f.call('/api/config')).data.features.scheduledStart,true);
@@ -179,6 +180,7 @@ test('一次性预约到点启动，预热和各档完整执行且阻止重复�
   assert.equal(run.status,'completed');assert.equal(run.config.scheduledAt,scheduledAt);
   assert.ok(run.startedAt>=scheduledAt);assert.ok(run.startedAt>run.createdAt);
   assert.equal(f.observed.voiceCalls,1);assert.equal(f.observed.calls,5);
+  assert.ok(f.observed.bodies.every(body=>body.interval_silence===350));
   assert.ok(f.observed.voiceTimes.every(time=>time>=scheduledAt));
   assert.ok(f.observed.synthTimes.every(time=>time>=scheduledAt));
   assert.ok(run.stages.every(stage=>stage.state==='completed'));
@@ -340,6 +342,9 @@ test('大于 64 并发实际进入上游，客户端连接池不截流且可手�
 
 test('配置校验与 WAV 内容检查', () => {
   const defaults = validateConfig({voiceId:'v',text:'测试'});
+  assert.equal(defaults.intervalSilence,200);
+  for (const intervalSilence of [0,200,'500',1000]) assert.equal(validateConfig({text:'测试',intervalSilence}).intervalSilence,Number(intervalSilence));
+  for (const intervalSilence of [-1,1001,0.5,'','  ','abc',true,false,[],{},Infinity,NaN]) assert.throws(()=>validateConfig({text:'测试',intervalSilence}),/intervalSilence/);
   assert.equal(defaults.downloadAudio,false);
   assert.equal(validateConfig({text:'测试',downloadAudio:true}).downloadAudio,true);
   for (const downloadAudio of ['false','true',0,1,null]) assert.throws(()=>validateConfig({text:'测试',downloadAudio}),/downloadAudio/);
@@ -441,6 +446,33 @@ test('预热时手动停止也生成报告，不把用户取消描述为预热�
   assert.equal(run.results.length,0); assert.equal(run.warmupError,undefined);
   assert.equal(run.reportsReady,true); assert.equal(run.stages[0].state,'skipped');
   assert.match(fs.readFileSync(path.join(f.folder,run.id+'.md'),'utf8'),/用户手动停止/);
+});
+
+/** 核对默认、零值和修改后的参数透传到预热与正式合成，并随报告持久化。 */
+test('段间静音默认 200 毫秒，可更改并透传到请求，历史报告不虚构参数值', async t => {
+  const f = await fixture(t);
+  assert.equal((await f.call('/api/config')).data.features.configurableIntervalSilence,true);
+  const invalid = await f.call('/api/runs',{text:'测试',intervalSilence:1001});
+  assert.equal(invalid.status,400); assert.equal(f.observed.calls,0);
+  for (const value of [undefined,0,'500',1000]) {
+    const expected = Number(value ?? 200);
+    const run = await f.run({downloadAudio:false,concurrencies:'1',requests:1,warmup:1,...(value===undefined?{}:{intervalSilence:value})});
+    assert.equal(run.status,'completed'); assert.equal(run.warmupDone,1);
+    assert.equal(run.config.intervalSilence,expected);
+    assert.ok(f.observed.bodies.slice(-2).every(body=>body.interval_silence===expected));
+    const json = JSON.parse(fs.readFileSync(path.join(f.folder,run.id+'.json'),'utf8'));
+    assert.equal(json.config.intervalSilence,expected);
+    const md = fs.readFileSync(path.join(f.folder,run.id+'.md'),'utf8');
+    assert.ok(md.includes(`段间静音（interval_silence）：${expected} 毫秒`));
+    const csv = fs.readFileSync(path.join(f.folder,run.id+'.csv'),'utf8');
+    assert.ok(csv.split('\r\n')[0].endsWith(',intervalSilence'));
+    assert.ok(csv.split('\r\n')[1].endsWith(`,"${expected}"`));
+    const historical = structuredClone(run);
+    delete historical.config.intervalSilence;
+    assert.match(markdownReport(historical),/interval_silence）：历史未记录（未显式发送）/);
+    assert.ok(csvReport(historical).split('\r\n')[1].endsWith(',""'));
+  }
+  assert.equal(f.observed.calls,8);
 });
 
 /** 验证默认模式不访问音频存储，预热、统计及持久化都采用获取链接的口径。 */

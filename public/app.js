@@ -177,6 +177,7 @@ function render(run) {
     }
     updateStartMode();
     for (const key of ['voiceId','lang','warmup','speechRate','loudnessRate']) $(key).value = run.config[key];
+    $('intervalSilence').value = run.config.intervalSilence ?? 200;
     $('synthTimeout').value = Math.min(Number(run.config.synthTimeout) || 20, 20);
     $('downloadTimeout').value = Math.min(Number(run.config.downloadTimeout) || 10, 10);
     $('downloadAudio').value = String(run.config.downloadAudio ?? false);
@@ -382,9 +383,9 @@ async function init() {
     $('connection').textContent = configured ? '本地服务在线 · 凭据已加载' : '本地服务在线 · 未配置凭据';
     $('connection').className = 'connection ' + (configured ? 'ready' : 'bad');
     activeBaseUrl = config.baseUrl; $('baseUrl').textContent = activeBaseUrl; $('ttsBaseUrl').value = activeBaseUrl; $('voiceId').value = config.voiceId||'';
-    if(!config.features?.randomVoices||!config.features?.clearHistory||!config.features?.scheduledStart||!config.features?.editableBaseUrl||!config.features?.optionalAudioDownload) {
+    if(!config.features?.randomVoices||!config.features?.clearHistory||!config.features?.scheduledStart||!config.features?.editableBaseUrl||!config.features?.optionalAudioDownload||!config.features?.configurableIntervalSilence) {
       configured=false;setBusy(false);$('clearHistory').disabled=true;
-      notice('当前服务版本较旧，请重启本地服务，再使用下载测试开关。');return;
+      notice('当前服务版本较旧，请重启本地服务，再使用段间静音配置和下载测试开关。');return;
     }
     serviceReady = true;
     if(config.features?.randomVoices)void loadVoiceInfo();
